@@ -1,0 +1,22 @@
+# Binaries
+/bin/
+*.exe
+*.test
+
+# Test and profiling output
+*.out
+coverage.*
+*.prof
+
+# Workspace files
+go.work
+go.work.sum
+
+# Local environment
+.env
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

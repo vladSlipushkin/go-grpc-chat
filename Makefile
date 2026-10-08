@@ -6,6 +6,10 @@
 GO_IMAGE ?= golang:1.27
 BIN_DIR  ?= bin
 
+# Development tools are pinned in a separate module so their dependencies
+# never leak into the application's go.mod.
+TOOL = go tool -modfile=tools/go.mod
+
 # Race detector needs cgo and a C toolchain; running it in the official
 # golang image keeps the host free of both. Module and build caches live in
 # named volumes so repeated runs stay fast.
@@ -60,7 +64,7 @@ test-race:
 
 .PHONY: vuln
 vuln:
-	go tool govulncheck ./...
+	$(TOOL) govulncheck ./...
 
 .PHONY: check
 check: lint test-race vuln

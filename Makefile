@@ -35,6 +35,7 @@ Usage: make TARGET
   proto-breaking  check contracts for breaking changes against local main
   check           lint, proto-lint, race tests and vulnerability scan
   build           build binaries into $(BIN_DIR)/
+  run             run the server locally with reflection enabled
   up              start local infrastructure and wait until healthy
   down            stop local infrastructure
 endef
@@ -88,6 +89,13 @@ check: lint proto-lint test-race vuln
 .PHONY: build
 build:
 	go build -o $(BIN_DIR)/ ./cmd/...
+
+# Target-specific export sets the variable for the recipe in any shell, which
+# "VAR=value command" syntax would not do under cmd.exe.
+.PHONY: run
+run: export CHAT_REFLECTION ?= true
+run:
+	go run ./cmd/server
 
 .PHONY: up
 up:

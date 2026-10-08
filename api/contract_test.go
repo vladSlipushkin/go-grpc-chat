@@ -184,6 +184,12 @@ func TestChatContract(t *testing.T) {
 			msg:  send("  hi "),
 		},
 		{
+			// Known limitation: the filler is a letter (Lo), so the rule lets it
+			// through even though it renders as blank. See ADR-0003.
+			name: "message text of a Hangul filler passes",
+			msg:  send("\u3164"),
+		},
+		{
 			name: "message text of an emoji",
 			msg:  send("\U0001F44D"),
 		},

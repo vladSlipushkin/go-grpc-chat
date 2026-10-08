@@ -235,8 +235,9 @@ type SendMessage struct {
 	RoomId string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
 	// The limit is in bytes so that server memory per queued message is
 	// bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
-	// At least one character must be visible: not whitespace, a separator, or
-	// a control or format character such as a zero-width space.
+	// At least one character must not be whitespace, a separator, or a
+	// control, format, private-use or unassigned code point (such as a
+	// zero-width space).
 	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -386,7 +387,8 @@ func (*ConnectResponse_Error) isConnectResponse_Event() {}
 
 func (*ConnectResponse_Message) isConnectResponse_Event() {}
 
-// Ack confirms that a request was applied.
+// Ack confirms that a request was applied. Messages from a room may arrive
+// before the Ack for joining it; none arrive after the Ack for leaving it.
 type Ack struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -507,8 +509,8 @@ type Message struct {
 	Text           string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
 	SentAt         *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=sent_at,json=sentAt,proto3" json:"sent_at,omitempty"`
 	// Position of the message in its room: 1, 2, 3 and so on without gaps. A
-	// jump means the client missed messages. Not comparable across a server
-	// restart until messages are stored.
+	// jump means the client missed messages. Until messages are stored, the
+	// sequence restarts when a room empties or the server restarts.
 	Seq           int64 `protobuf:"varint,7,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

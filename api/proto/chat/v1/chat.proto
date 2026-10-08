@@ -64,8 +64,9 @@ message SendMessage {
   }];
   // The limit is in bytes so that server memory per queued message is
   // bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
-  // At least one character must be visible: not whitespace, a separator, or
-  // a control or format character such as a zero-width space.
+  // At least one character must not be whitespace, a separator, or a
+  // control, format, private-use or unassigned code point (such as a
+  // zero-width space).
   string text = 2 [(buf.validate.field).string = {
     min_len: 1
     max_bytes: 4096
@@ -83,7 +84,8 @@ message ConnectResponse {
   }
 }
 
-// Ack confirms that a request was applied.
+// Ack confirms that a request was applied. Messages from a room may arrive
+// before the Ack for joining it; none arrive after the Ack for leaving it.
 message Ack {
   string request_id = 1;
   // Set only for SendMessage. The message itself is also delivered to the
@@ -109,7 +111,7 @@ message Message {
   string text = 5;
   google.protobuf.Timestamp sent_at = 6;
   // Position of the message in its room: 1, 2, 3 and so on without gaps. A
-  // jump means the client missed messages. Not comparable across a server
-  // restart until messages are stored.
+  // jump means the client missed messages. Until messages are stored, the
+  // sequence restarts when a room empties or the server restarts.
   int64 seq = 7;
 }

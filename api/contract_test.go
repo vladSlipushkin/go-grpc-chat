@@ -157,7 +157,35 @@ func TestChatContract(t *testing.T) {
 		{
 			name: "empty message text",
 			msg:  send(""),
-			want: []string{"send_message.text:string.min_len"},
+			want: []string{"send_message.text:string.min_len", "send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of spaces",
+			msg:  send("   \t\n"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of no-break and ideographic spaces",
+			msg:  send(" 　"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of a zero-width space",
+			msg:  send("​"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of a bidi override",
+			msg:  send("‮"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text padded with spaces",
+			msg:  send("  hi "),
+		},
+		{
+			name: "message text of an emoji",
+			msg:  send("\U0001F44D"),
 		},
 		{
 			name: "message text at byte limit",

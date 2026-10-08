@@ -64,9 +64,12 @@ message SendMessage {
   }];
   // The limit is in bytes so that server memory per queued message is
   // bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
+  // At least one character must be visible: not whitespace, a separator, or
+  // a control or format character such as a zero-width space.
   string text = 2 [(buf.validate.field).string = {
     min_len: 1
     max_bytes: 4096
+    pattern: "[^\\s\\p{Z}\\p{C}]"
   }];
 }
 
@@ -105,4 +108,8 @@ message Message {
   string sender_username = 4;
   string text = 5;
   google.protobuf.Timestamp sent_at = 6;
+  // Position of the message in its room: 1, 2, 3 and so on without gaps. A
+  // jump means the client missed messages. Not comparable across a server
+  // restart until messages are stored.
+  int64 seq = 7;
 }

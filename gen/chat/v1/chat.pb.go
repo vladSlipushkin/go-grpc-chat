@@ -235,6 +235,8 @@ type SendMessage struct {
 	RoomId string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
 	// The limit is in bytes so that server memory per queued message is
 	// bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
+	// At least one character must be visible: not whitespace, a separator, or
+	// a control or format character such as a zero-width space.
 	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -504,8 +506,12 @@ type Message struct {
 	SenderUsername string                 `protobuf:"bytes,4,opt,name=sender_username,json=senderUsername,proto3" json:"sender_username,omitempty"`
 	Text           string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
 	SentAt         *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=sent_at,json=sentAt,proto3" json:"sent_at,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Position of the message in its room: 1, 2, 3 and so on without gaps. A
+	// jump means the client missed messages. Not comparable across a server
+	// restart until messages are stored.
+	Seq           int64 `protobuf:"varint,7,opt,name=seq,proto3" json:"seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Message) Reset() {
@@ -580,6 +586,13 @@ func (x *Message) GetSentAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Message) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
 var File_chat_v1_chat_proto protoreflect.FileDescriptor
 
 const file_chat_v1_chat_proto_rawDesc = "" +
@@ -596,11 +609,10 @@ const file_chat_v1_chat_proto_rawDesc = "" +
 	"\bJoinRoom\x126\n" +
 	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\"C\n" +
 	"\tLeaveRoom\x126\n" +
-	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\"e\n" +
+	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\"v\n" +
 	"\vSendMessage\x126\n" +
-	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\x12\x1e\n" +
-	"\x04text\x18\x02 \x01(\tB\n" +
-	"\xbaH\ar\x05\x10\x01(\x80 R\x04text\"\x92\x01\n" +
+	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\x12/\n" +
+	"\x04text\x18\x02 \x01(\tB\x1b\xbaH\x18r\x16\x10\x01(\x80 2\x0f[^\\s\\p{Z}\\p{C}]R\x04text\"\x92\x01\n" +
 	"\x0fConnectResponse\x12 \n" +
 	"\x03ack\x18\x01 \x01(\v2\f.chat.v1.AckH\x00R\x03ack\x12&\n" +
 	"\x05error\x18\x02 \x01(\v2\x0e.chat.v1.ErrorH\x00R\x05error\x12,\n" +
@@ -614,14 +626,15 @@ const file_chat_v1_chat_proto_rawDesc = "" +
 	"\x05Error\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12*\n" +
-	"\x06status\x18\x02 \x01(\v2\x12.google.rpc.StatusR\x06status\"\xc1\x01\n" +
+	"\x06status\x18\x02 \x01(\v2\x12.google.rpc.StatusR\x06status\"\xd3\x01\n" +
 	"\aMessage\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\aroom_id\x18\x02 \x01(\tR\x06roomId\x12\x1b\n" +
 	"\tsender_id\x18\x03 \x01(\tR\bsenderId\x12'\n" +
 	"\x0fsender_username\x18\x04 \x01(\tR\x0esenderUsername\x12\x12\n" +
 	"\x04text\x18\x05 \x01(\tR\x04text\x123\n" +
-	"\asent_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x06sentAt2O\n" +
+	"\asent_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x06sentAt\x12\x10\n" +
+	"\x03seq\x18\a \x01(\x03R\x03seq2O\n" +
 	"\vChatService\x12@\n" +
 	"\aConnect\x12\x17.chat.v1.ConnectRequest\x1a\x18.chat.v1.ConnectResponse(\x010\x01B\x90\x01\n" +
 	"\vcom.chat.v1B\tChatProtoP\x01Z9github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1;chatv1\xa2\x02\x03CXX\xaa\x02\aChat.V1\xca\x02\aChat\\V1\xe2\x02\x13Chat\\V1\\GPBMetadata\xea\x02\bChat::V1b\x06proto3"

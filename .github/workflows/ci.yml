@@ -32,7 +32,8 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test with race detector
-        run: go test -race -coverprofile=coverage.out ./...
+        # Generated packages have no tests and would drag the total to near zero.
+        run: go test -race -coverprofile=coverage.out $(go list ./... | grep -v /gen/)
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -n 1
 
@@ -53,6 +54,10 @@ jobs:
       - name: Breaking changes against main
         if: github.event_name == 'pull_request'
         run: |
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::origin/main is not fetched, cannot check breaking changes"
+            exit 1
+          fi
           if ! git cat-file -e origin/main:buf.yaml 2>/dev/null; then
             echo "::notice::main has no protobuf module yet, skipping breaking change check"
             exit 0
@@ -88,5 +93,5 @@ jobs:
       - name: Check modules are tidy
         run: |
           go mod tidy -diff
-          go mod tidy -modfile=tools/go.mod -diff
+          go -C tools mod tidy -diff
       - run: go build ./...

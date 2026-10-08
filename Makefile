@@ -32,7 +32,7 @@ Usage: make TARGET
   vuln            scan dependencies for known vulnerabilities
   gen             generate Go code from protobuf contracts
   proto-lint      lint and format-check protobuf contracts
-  proto-breaking  check contracts for breaking changes against main
+  proto-breaking  check contracts for breaking changes against local main
   check           lint, proto-lint, race tests and vulnerability scan
   build           build binaries into $(BIN_DIR)/
   up              start local infrastructure and wait until healthy

@@ -42,7 +42,8 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer) err
 		return fmt.Errorf("listen on %s: %w", cfg.GRPCAddr, err)
 	}
 
-	srv := server.New(logger, server.Options{
+	// Interceptors built by New take each call's context from the call itself.
+	srv := server.New(logger, server.Options{ //nolint:contextcheck // false positive, see above
 		Reflection:      cfg.Reflection,
 		ShutdownTimeout: cfg.ShutdownTimeout,
 	})

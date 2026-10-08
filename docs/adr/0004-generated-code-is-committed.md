@@ -16,7 +16,10 @@ files.
 
 ## Decision
 
-- Generated code lives in `gen/` and is committed.
+- Generated code lives in `gen/` and is committed. It stays outside
+  `internal/` on purpose: the stubs are the Go client SDK for this API, the
+  one part of the module other modules are expected to import. This refines
+  ADR-0001.
 - Generation is reproducible: buf and the protoc plugins are pinned in
   `tools/go.mod`, protobuf dependencies in `buf.lock`. `buf.gen.yaml` runs the
   plugins through `go tool`, so nothing has to be installed globally.
@@ -35,3 +38,9 @@ files.
   CI catches it when that is forgotten.
 - Pull requests that change contracts show the generated diff collapsed, so
   review focuses on the `.proto` change.
+- Dependabot updates of the protoc plugins change the version header of the
+  generated files, so those PRs fail the drift check until `make gen` is run
+  on their branch.
+- `protoc-gen-go` in `tools/go.mod` must not be newer than
+  `google.golang.org/protobuf` in the root `go.mod`; generated code refuses to
+  run against an older runtime. Bump the runtime first.

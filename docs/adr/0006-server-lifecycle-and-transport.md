@@ -28,19 +28,35 @@ settings at the cost of a dependency.
 
 On SIGINT or SIGTERM:
 
-1. The health service switches to `NOT_SERVING`, so load balancers and
-   watchers stop sending new clients here.
+1. The health service switches to `NOT_SERVING`. Clients watching health
+   learn it first; clients polling `Check` see the listener close at about
+   the same moment, since there is no drain delay before the next step.
 2. `GracefulStop` stops accepting connections and RPCs and waits for running
    ones to finish.
 3. If they have not finished within the shutdown timeout (10 seconds by
    default), `Stop` cancels them and closes every connection.
 
 `GracefulStop` alone would never return while a chat stream is open, because
-a stream only ends when the client or the handler ends it. The timeout is the
-backstop. Chat stream handlers will also watch for shutdown themselves and
-end their streams with `UNAVAILABLE` (ADR-0003), so clients get a clear status
-and can reconnect elsewhere instead of being cut off by `Stop`; that part
-arrives with the stream handler.
+a stream only ends when the client or the handler ends it; a health `Watch`
+from grpcurl or a client's health checking holds it the same way. The timeout
+is the backstop.
+
+`GracefulStop` does not cancel the contexts of running streams; it only stops
+new RPCs. Chat stream handlers will therefore get an explicit shutdown signal
+from the process's root context, not from their stream context, and end
+their streams with `UNAVAILABLE` (ADR-0003). Clients then get a clear status
+and can reconnect elsewhere instead of being cut off by `Stop`; this arrives
+with the stream handler.
+
+`Serve` returns only after every handler has returned, including after
+`Stop`. Every handler must therefore return once its context is cancelled;
+a handler that ignores cancellation would hang shutdown. As a safety net, the
+first SIGINT or SIGTERM restores default signal handling, so a second one
+kills the process.
+
+If accepting connections fails on its own, the server shuts down the same
+way before reporting the error: closing the listener alone would leave
+already accepted connections running.
 
 ### Transport limits
 
@@ -53,7 +69,9 @@ arrives with the stream handler.
 - Clients may ping at most once a minute, also when they have no active RPC.
   A client that pings more often is disconnected with `GOAWAY` and
   `too_many_pings`. Every client must therefore set its keepalive time to at
-  least one minute; the CLI client must respect this.
+  least one minute; the CLI client must respect this. grpc-go tolerates a
+  couple of early pings before it disconnects, but clients should not rely
+  on that.
 - No maximum connection age: rotating connections would cut chat streams on
   a timer.
 
@@ -66,8 +84,9 @@ this project:
   client and logs the panic with its stack;
 - logging records method, status code, duration and peer when the call ends.
   Calls ending with server-side codes (`INTERNAL`, `UNKNOWN`, `DATA_LOSS`,
-  `UNIMPLEMENTED`) are logged as errors, other failures as warnings, and
-  health checks only at debug level so frequent probes do not flood the log.
+  `UNIMPLEMENTED`) are logged as errors, cancelled calls as information like
+  successful ones, other failures as warnings, and health checks only at
+  debug level so frequent probes do not flood the log.
 
 Logging wraps recovery, so a recovered panic is logged with the `INTERNAL`
 code the client actually receives.
@@ -85,8 +104,9 @@ asks to; `make run` turns it on for local use with grpcurl.
 
 ## Consequences
 
-- A stop signal finishes within the shutdown timeout even with streams open.
-- Dead clients are detected within about two and a half minutes.
+- A stop signal finishes within the shutdown timeout even with streams open,
+  provided every handler returns once its context is cancelled.
+- Dead clients are detected within 2 minutes 20 seconds of going silent.
 - Client implementations have to configure keepalive within the server's
   policy or be disconnected.
 - Interceptor behaviour is covered by unit tests; the shutdown sequence and

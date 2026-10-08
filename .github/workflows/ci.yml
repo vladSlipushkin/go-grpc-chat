@@ -58,10 +58,6 @@ jobs:
             echo "::error::origin/main is not fetched, cannot check breaking changes"
             exit 1
           fi
-          if ! git cat-file -e origin/main:buf.yaml 2>/dev/null; then
-            echo "::notice::main has no protobuf module yet, skipping breaking change check"
-            exit 0
-          fi
           git branch --force main origin/main
           go tool -modfile=tools/go.mod buf breaking --against ".git#branch=main"
       - name: Generated code is up to date

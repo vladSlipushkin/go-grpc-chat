@@ -182,7 +182,8 @@ func (x *JoinRoom) GetRoomId() string {
 }
 
 // LeaveRoom unsubscribes the connection from a room. Leaving a room the
-// connection is not in fails with FAILED_PRECONDITION.
+// connection is not in is acknowledged as a no-op, so join and leave can both
+// be retried safely.
 type LeaveRoom struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RoomId        string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
@@ -230,9 +231,11 @@ func (x *LeaveRoom) GetRoomId() string {
 // SendMessage posts text to a room the connection has joined; otherwise it
 // fails with FAILED_PRECONDITION. The sender is taken from the access token.
 type SendMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RoomId        string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
-	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	RoomId string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
+	// The limit is in bytes so that server memory per queued message is
+	// bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
+	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -281,7 +284,8 @@ func (x *SendMessage) GetText() string {
 	return ""
 }
 
-// ConnectResponse is one server event.
+// ConnectResponse is one server event. New event types may be added over
+// time; clients must ignore events they do not recognise.
 type ConnectResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Event:
@@ -385,7 +389,8 @@ type Ack struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Set only for SendMessage. The message itself is also delivered to the
-	// sender as a regular Message event; the id links the two.
+	// sender as a regular Message event, possibly before this Ack; the id links
+	// the two.
 	MessageId     string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -587,15 +592,15 @@ const file_chat_v1_chat_proto_rawDesc = "" +
 	"\n" +
 	"leave_room\x18\x03 \x01(\v2\x12.chat.v1.LeaveRoomH\x00R\tleaveRoom\x129\n" +
 	"\fsend_message\x18\x04 \x01(\v2\x14.chat.v1.SendMessageH\x00R\vsendMessageB\x0f\n" +
-	"\x06action\x12\x05\xbaH\x02\b\x01\"E\n" +
-	"\bJoinRoom\x129\n" +
-	"\aroom_id\x18\x01 \x01(\tB \xbaH\x1dr\x1b2\x19^[a-z0-9][a-z0-9-]{0,63}$R\x06roomId\"F\n" +
-	"\tLeaveRoom\x129\n" +
-	"\aroom_id\x18\x01 \x01(\tB \xbaH\x1dr\x1b2\x19^[a-z0-9][a-z0-9-]{0,63}$R\x06roomId\"h\n" +
-	"\vSendMessage\x129\n" +
-	"\aroom_id\x18\x01 \x01(\tB \xbaH\x1dr\x1b2\x19^[a-z0-9][a-z0-9-]{0,63}$R\x06roomId\x12\x1e\n" +
+	"\x06action\x12\x05\xbaH\x02\b\x01\"B\n" +
+	"\bJoinRoom\x126\n" +
+	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\"C\n" +
+	"\tLeaveRoom\x126\n" +
+	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\"e\n" +
+	"\vSendMessage\x126\n" +
+	"\aroom_id\x18\x01 \x01(\tB\x1d\xbaH\x1ar\x18\x18@2\x14^[a-z0-9][a-z0-9-]*$R\x06roomId\x12\x1e\n" +
 	"\x04text\x18\x02 \x01(\tB\n" +
-	"\xbaH\ar\x05\x10\x01\x18\x80 R\x04text\"\x92\x01\n" +
+	"\xbaH\ar\x05\x10\x01(\x80 R\x04text\"\x92\x01\n" +
 	"\x0fConnectResponse\x12 \n" +
 	"\x03ack\x18\x01 \x01(\v2\f.chat.v1.AckH\x00R\x03ack\x12&\n" +
 	"\x05error\x18\x02 \x01(\v2\x0e.chat.v1.ErrorH\x00R\x05error\x12,\n" +

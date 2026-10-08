@@ -40,6 +40,11 @@ func TestAuthContract(t *testing.T) {
 			want: []string{"username:string.pattern"},
 		},
 		{
+			name: "username with uppercase",
+			msg:  &authv1.RegisterRequest{Username: "Alice", Password: "correct horse"},
+			want: []string{"username:string.pattern"},
+		},
+		{
 			name: "password too short",
 			msg:  &authv1.RegisterRequest{Username: "alice", Password: "1234567"},
 			want: []string{"password:string.min_len"},
@@ -68,6 +73,11 @@ func TestAuthContract(t *testing.T) {
 			name: "login without credentials",
 			msg:  &authv1.LoginRequest{},
 			want: []string{"password:required", "username:required"},
+		},
+		{
+			name: "login username over length limit",
+			msg:  &authv1.LoginRequest{Username: strings.Repeat("a", 33), Password: "correct horse"},
+			want: []string{"username:string.max_len"},
 		},
 		{
 			name: "login password over bcrypt limit",
@@ -137,6 +147,11 @@ func TestChatContract(t *testing.T) {
 		{
 			name: "room id over length limit",
 			msg:  join(strings.Repeat("a", 65)),
+			want: []string{"join_room.room_id:string.max_len"},
+		},
+		{
+			name: "empty room id",
+			msg:  join(""),
 			want: []string{"join_room.room_id:string.pattern"},
 		},
 		{
@@ -145,13 +160,23 @@ func TestChatContract(t *testing.T) {
 			want: []string{"send_message.text:string.min_len"},
 		},
 		{
-			name: "message text at length limit",
+			name: "message text at byte limit",
 			msg:  send(strings.Repeat("a", 4096)),
 		},
 		{
-			name: "message text over length limit",
+			name: "message text over byte limit",
 			msg:  send(strings.Repeat("a", 4097)),
-			want: []string{"send_message.text:string.max_len"},
+			want: []string{"send_message.text:string.max_bytes"},
+		},
+		{
+			// 2048 Cyrillic letters are 4096 bytes in UTF-8.
+			name: "multibyte message text at byte limit",
+			msg:  send(strings.Repeat("ж", 2048)),
+		},
+		{
+			name: "multibyte message text over byte limit",
+			msg:  send(strings.Repeat("ж", 2049)),
+			want: []string{"send_message.text:string.max_bytes"},
 		},
 	}
 

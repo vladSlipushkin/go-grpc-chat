@@ -23,9 +23,12 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// RegisterRequest carries the credentials of a new account.
 type RegisterRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	Username string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lowercase only, so names differing just in case cannot impersonate each
+	// other. Shown to other users as the message sender.
+	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
 	// Passwords are hashed with bcrypt, which only uses the first 72 bytes.
 	// Longer input is rejected instead of being silently truncated. The limit
 	// is in bytes, not characters: non-ASCII characters take several bytes.
@@ -78,9 +81,11 @@ func (x *RegisterRequest) GetPassword() string {
 	return ""
 }
 
+// RegisterResponse identifies the created account.
 type RegisterResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Opaque identifier; clients must not parse it.
+	UserId        string `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -122,6 +127,8 @@ func (x *RegisterResponse) GetUserId() string {
 	return ""
 }
 
+// LoginRequest carries the credentials of an existing account. Only length
+// limits are checked here: format rules belong to registration.
 type LoginRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
@@ -174,6 +181,7 @@ func (x *LoginRequest) GetPassword() string {
 	return ""
 }
 
+// LoginResponse carries the access token for later calls.
 type LoginResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Sent as "authorization: Bearer <token>" metadata on later calls.
@@ -231,14 +239,15 @@ var File_auth_v1_auth_proto protoreflect.FileDescriptor
 
 const file_auth_v1_auth_proto_rawDesc = "" +
 	"\n" +
-	"\x12auth/v1/auth.proto\x12\aauth.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"p\n" +
-	"\x0fRegisterRequest\x126\n" +
-	"\busername\x18\x01 \x01(\tB\x1a\xbaH\x17r\x15\x10\x03\x18 2\x0f^[A-Za-z0-9_]+$R\busername\x12%\n" +
+	"\x12auth/v1/auth.proto\x12\aauth.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"m\n" +
+	"\x0fRegisterRequest\x123\n" +
+	"\busername\x18\x01 \x01(\tB\x17\xbaH\x14r\x12\x10\x03\x18 2\f^[a-z0-9_]+$R\busername\x12%\n" +
 	"\bpassword\x18\x02 \x01(\tB\t\xbaH\x06r\x04\x10\b(HR\bpassword\"+\n" +
 	"\x10RegisterResponse\x12\x17\n" +
-	"\auser_id\x18\x01 \x01(\tR\x06userId\"Z\n" +
-	"\fLoginRequest\x12\"\n" +
-	"\busername\x18\x01 \x01(\tB\x06\xbaH\x03\xc8\x01\x01R\busername\x12&\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"^\n" +
+	"\fLoginRequest\x12&\n" +
+	"\busername\x18\x01 \x01(\tB\n" +
+	"\xbaH\a\xc8\x01\x01r\x02\x18 R\busername\x12&\n" +
 	"\bpassword\x18\x02 \x01(\tB\n" +
 	"\xbaH\a\xc8\x01\x01r\x02(HR\bpassword\"m\n" +
 	"\rLoginResponse\x12!\n" +

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Reads text on stdin and fails if it contains a likely secret or matches any
+# pattern from the local deny-list .git/info/forbidden-words (one extended
+# regex per line, '#' comments allowed). Used by the commit hooks and handy for
+# checking any other text: scripts/githooks/check-text < file
+set -u
+
+text=$(cat)
+status=0
+
+secrets='-----BEGIN [A-Z ]*PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}'
+# Print line numbers only: echoing a secret back would leak it into logs.
+lines=$(printf '%s\n' "$text" | grep -nE -e "$secrets" | cut -d: -f1 | tr '\n' ' ')
+if [ -n "$lines" ]; then
+	echo "possible secret on line(s): $lines" >&2
+	status=1
+fi
+
+# --git-path resolves to the shared .git/info even inside a linked worktree.
+words_file=$(git rev-parse --git-path info/forbidden-words)
+if [ -f "$words_file" ]; then
+	patterns=$(grep -Ev '^(#|$)' "$words_file")
+	if [ -n "$patterns" ]; then
+		hits=$(printf '%s\n' "$text" | grep -inE -e "$patterns")
+		if [ -n "$hits" ]; then
+			echo "forbidden words:" >&2
+			echo "$hits" >&2
+			status=1
+		fi
+	fi
+fi
+
+exit $status

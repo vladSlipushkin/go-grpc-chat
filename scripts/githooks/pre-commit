@@ -1,0 +1,58 @@
+#!/bin/sh
+# Blocks a commit when staged Go files are not gofmt-ed, when a staged path
+# matches the local deny-list .git/info/forbidden-paths, or when lines added
+# to a file fail scripts/githooks/check-text.
+set -u
+
+hooks_dir=$(dirname "$0")
+status=0
+
+command -v gofmt >/dev/null || {
+	echo "gofmt not found in PATH" >&2
+	exit 1
+}
+
+staged() {
+	git diff --cached --name-only --diff-filter=ACMR "$@"
+}
+
+# Check the staged blob, not the working tree, so partial staging is honoured.
+unformatted=$(staged -- '*.go' | while IFS= read -r f; do
+	if ! out=$(git show ":$f" | gofmt -l); then
+		echo "$f (gofmt failed)"
+	elif [ -n "$out" ]; then
+		echo "$f"
+	fi
+done)
+if [ -n "$unformatted" ]; then
+	echo "not gofmt-ed (run 'make fmt'):" >&2
+	echo "$unformatted" >&2
+	status=1
+fi
+
+# --git-path resolves to the shared .git/info even inside a linked worktree.
+paths_file=$(git rev-parse --git-path info/forbidden-paths)
+if [ -f "$paths_file" ]; then
+	patterns=$(grep -Ev '^(#|$)' "$paths_file")
+	if [ -n "$patterns" ]; then
+		bad=$(staged | grep -E -e "$patterns")
+		if [ -n "$bad" ]; then
+			echo "staged paths are on the local deny-list:" >&2
+			echo "$bad" >&2
+			status=1
+		fi
+	fi
+fi
+
+failed=$(staged | while IFS= read -r f; do
+	if ! git diff --cached -U0 -- "$f" | grep '^+' | grep -v '^+++' | "$hooks_dir/check-text"; then
+		echo "$f"
+	fi
+done)
+if [ -n "$failed" ]; then
+	echo "text check failed in (line numbers count added lines only):" >&2
+	echo "$failed" >&2
+	status=1
+fi
+
+exit $status

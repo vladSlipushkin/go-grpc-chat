@@ -19,6 +19,7 @@ DOCKER_GO = docker run --rm \
 .PHONY: help
 help:
 	@echo Usage: make TARGET
+	@echo   hooks      enable git hooks from scripts/githooks
 	@echo   fmt        format code
 	@echo   lint       run golangci-lint
 	@echo   test       run unit tests
@@ -28,6 +29,10 @@ help:
 	@echo   build      build binaries into $(BIN_DIR)/
 	@echo   up         start local infrastructure and wait until healthy
 	@echo   down       stop local infrastructure
+
+.PHONY: hooks
+hooks:
+	git config core.hooksPath scripts/githooks
 
 .PHONY: fmt
 fmt:

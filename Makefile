@@ -24,16 +24,19 @@ DOCKER_GO = docker run --rm \
 
 define HELP
 Usage: make TARGET
-  hooks      enable git hooks from scripts/githooks
-  fmt        format code
-  lint       run golangci-lint
-  test       run unit tests
-  test-race  run tests with the race detector in Docker
-  vuln       scan dependencies for known vulnerabilities
-  check      lint, race tests and vulnerability scan
-  build      build binaries into $(BIN_DIR)/
-  up         start local infrastructure and wait until healthy
-  down       stop local infrastructure
+  hooks           enable git hooks from scripts/githooks
+  fmt             format code
+  lint            run golangci-lint
+  test            run unit tests
+  test-race       run tests with the race detector in Docker
+  vuln            scan dependencies for known vulnerabilities
+  gen             generate Go code from protobuf contracts
+  proto-lint      lint and format-check protobuf contracts
+  proto-breaking  check contracts for breaking changes against main
+  check           lint, proto-lint, race tests and vulnerability scan
+  build           build binaries into $(BIN_DIR)/
+  up              start local infrastructure and wait until healthy
+  down            stop local infrastructure
 endef
 
 # Printed by make itself: echo keeps spacing in cmd.exe but collapses it in sh.
@@ -66,8 +69,21 @@ test-race:
 vuln:
 	$(TOOL) govulncheck ./...
 
+.PHONY: gen
+gen:
+	$(TOOL) buf generate
+
+.PHONY: proto-lint
+proto-lint:
+	$(TOOL) buf lint
+	$(TOOL) buf format --diff --exit-code
+
+.PHONY: proto-breaking
+proto-breaking:
+	$(TOOL) buf breaking --against ".git#branch=main"
+
 .PHONY: check
-check: lint test-race vuln
+check: lint proto-lint test-race vuln
 
 .PHONY: build
 build:

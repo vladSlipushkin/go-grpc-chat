@@ -166,17 +166,17 @@ func TestChatContract(t *testing.T) {
 		},
 		{
 			name: "message text of no-break and ideographic spaces",
-			msg:  send(" 　"),
+			msg:  send("\u00a0\u3000"),
 			want: []string{"send_message.text:string.pattern"},
 		},
 		{
 			name: "message text of a zero-width space",
-			msg:  send("​"),
+			msg:  send("\u200b"),
 			want: []string{"send_message.text:string.pattern"},
 		},
 		{
 			name: "message text of a bidi override",
-			msg:  send("‮"),
+			msg:  send("\u202e"),
 			want: []string{"send_message.text:string.pattern"},
 		},
 		{

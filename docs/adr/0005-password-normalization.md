@@ -38,8 +38,12 @@ the byte length, so the limit has to hold for the normalized form.
 - The 72-byte limit is checked again after normalization. Some characters
   expand under NFKC, so a password that passes the contract check can still
   exceed the limit; it is rejected with `INVALID_ARGUMENT` on the `password`
-  field rather than being truncated by bcrypt.
+  field. Without the check, Go's bcrypt would return `ErrPasswordTooLong`
+  and the client would see an internal error.
 - ASCII passwords are unchanged by NFKC.
+- Unassigned code points are not rejected, although a strict stabilized
+  string would exclude them. A password using one could normalize differently
+  after a Unicode version upgrade; the risk is accepted as negligible.
 
 ## Consequences
 

@@ -31,13 +31,13 @@ files.
   it in diffs and leaves it out of language statistics.
 - Breaking-change detection uses buf's `FILE` category, the strictest one.
   Because `gen/` is a Go SDK, renaming a field or message breaks consumers'
-  code even when the wire format stays compatible; `WIRE` or `WIRE_JSON`
-  would let that through.
+  code even when the wire format stays compatible: `WIRE` would let a field
+  rename through, and `WIRE_JSON` a message rename.
 
 Rejected: a separate Go module for `gen/`. It would give SDK users a smaller
 dependency graph, since today they also pull in everything the server
-requires, but it needs its own versioning and release tags and a `replace`
-during development. Worth revisiting if the SDK gets external users.
+requires, but it needs its own versioning and release tags, and a `replace`
+or `go.work` during development. Worth revisiting if the SDK gets external users.
 
 ## Consequences
 

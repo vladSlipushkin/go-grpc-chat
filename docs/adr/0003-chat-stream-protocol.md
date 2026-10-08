@@ -52,8 +52,10 @@ Server rules that the schema cannot express:
   `message_id` in its `Ack` links the two.
 - Message text is limited to 4096 bytes, not characters, so the memory a
   queued message takes does not depend on the script it is written in. It
-  must contain at least one character that is not whitespace, a separator or
-  a control or format character, which rejects blank and invisible messages.
+  must contain at least one character that is not whitespace, a separator, or
+  a control, format, private-use or unassigned code point. That rejects blank
+  messages and those made only of such characters; visible-looking fillers
+  such as U+3164 HANGUL FILLER still pass, which a test records.
 
 Non-goals for v1, each addable later without breaking the contract:
 
@@ -66,19 +68,23 @@ Non-goals for v1, each addable later without breaking the contract:
 
 ### Processing model
 
-- Requests of one stream are handled one at a time, in the order received. A
-  join is applied before the next request is read, so join-then-send never
+- Requests of one stream are handled one at a time, in the order received.
+  Join and leave are synchronous: the room applies them before the reader
+  enqueues the `Ack` and reads the next request, so join-then-send never
   fails with `FAILED_PRECONDITION`.
-- Each connection has one outbound queue and one goroutine that writes to the
-  stream; gRPC does not allow concurrent sends on a stream. The connection's
-  reader enqueues `Ack` and `Error`; rooms enqueue `Message`. Because they are
-  enqueued by different goroutines, an `Ack` and the sender's own `Message`
-  may arrive in either order, and messages a room enqueued before a leave may
-  still arrive after the `Ack` for that leave. Clients must tolerate both.
+- Each connection has one first-in, first-out outbound queue and one
+  goroutine that writes to the stream; gRPC does not allow concurrent sends
+  on a stream. The connection's reader enqueues `Ack` and `Error`; rooms
+  enqueue `Message`. Because they are enqueued by different goroutines:
+  - a room's `Message` may arrive before the `Ack` for joining that room;
+  - the sender's own `Message` may arrive before or after the `Ack` for
+    sending it;
+  - nothing from a room arrives after the `Ack` for leaving it.
 - Requests are validated in the handler, not by a protovalidate stream
-  interceptor. An interceptor fails the `RecvMsg` call and ends the stream,
-  which would turn a request-scoped error into a connection-scoped one and
-  lose the `request_id`.
+  interceptor. An interceptor reports a violation as a `RecvMsg` error, so the
+  handler would have to tell it apart from transport errors by code and then
+  read `request_id` from a message it was told is invalid. Validating in the
+  handler keeps request errors request-scoped by construction.
 
 ### Request correlation
 
@@ -105,9 +111,12 @@ missed messages, and `seq` is the cursor `ListMessages` will page by.
   allocation per room even across processes, and a rolled-back transaction
   leaves no gap. The counter lives in the database, so a restart resumes where
   it stopped.
-- Until storage exists, a restart starts every room from 1 again. Messages do
-  not survive a restart either, so clients must not compare `seq` across a
-  server restart before storage lands.
+- Until storage exists, a room's goroutine stops once its last member leaves,
+  and its counter goes with it; keeping counters for every room name ever
+  used would let clients grow server memory without bound. A room recreated
+  later, or any room after a server restart, starts from 1 again. Messages do
+  not outlive the room either, so clients must not compare `seq` across a
+  room becoming empty or a server restart before storage lands.
 - With storage, the room waits for the insert before broadcasting, so one
   room's throughput is bounded by database latency. Rooms are independent of
   each other, and the bound is far above chat traffic.
@@ -144,6 +153,9 @@ domain `chat.v1` and one of these reasons:
 - `ROOM_LIMIT_EXCEEDED`: the join would exceed 16 rooms (in the stream);
 - `SLOW_CLIENT`: the outbound queue was full (ends the stream);
 - `TOKEN_EXPIRED`: the access token expired (ends the stream).
+
+The domain is the protobuf package rather than a DNS name as AIP-193
+suggests, because the service has no public hostname.
 
 Only requests that decode successfully reach this model. A message that is
 not valid protobuf, has invalid UTF-8 in a string field or exceeds the

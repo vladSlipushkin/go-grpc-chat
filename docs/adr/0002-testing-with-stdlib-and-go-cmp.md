@@ -26,8 +26,8 @@ values are too complex for `==`.
 
 - Use the standard `testing` package. Table-driven tests where there are
   several cases; `t.Helper()` in helpers; `t.Context()` for contexts.
-- Compare structured values with `cmp.Diff(want, got)`; add
-  `protocmp.Transform()` for protobuf messages.
+- Compare structured values with `cmp.Diff(want, got)` and report the result
+  as `(-want +got)`; add `protocmp.Transform()` for protobuf messages.
 - Failure messages follow the `Func(args) = got, want want` form.
 - No mocking framework. Dependencies are small interfaces satisfied by
   hand-written fakes in tests.

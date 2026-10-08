@@ -1,5 +1,7 @@
-# Recipes call only go, docker and git so they behave the same under
-# cmd.exe on Windows and sh on Linux/macOS.
+# Recipes run plain commands without shell syntax so they behave the same
+# under cmd.exe on Windows and sh on Linux/macOS.
+#
+# Requires: Go 1.27, Docker, golangci-lint v2.14.0 (same version as CI).
 
 GO_IMAGE ?= golang:1.27
 BIN_DIR  ?= bin
@@ -16,19 +18,25 @@ DOCKER_GO = docker run --rm \
 
 .DEFAULT_GOAL := help
 
+define HELP
+Usage: make TARGET
+  hooks      enable git hooks from scripts/githooks
+  fmt        format code
+  lint       run golangci-lint
+  test       run unit tests
+  test-race  run tests with the race detector in Docker
+  vuln       scan dependencies for known vulnerabilities
+  check      lint, race tests and vulnerability scan
+  build      build binaries into $(BIN_DIR)/
+  up         start local infrastructure and wait until healthy
+  down       stop local infrastructure
+endef
+
+# Printed by make itself: echo keeps spacing in cmd.exe but collapses it in sh.
+# "cd ." is a no-op that works in both shells and silences "Nothing to be done".
 .PHONY: help
 help:
-	@echo Usage: make TARGET
-	@echo   hooks      enable git hooks from scripts/githooks
-	@echo   fmt        format code
-	@echo   lint       run golangci-lint
-	@echo   test       run unit tests
-	@echo   test-race  run tests with the race detector in Docker
-	@echo   vuln       scan dependencies for known vulnerabilities
-	@echo   check      lint, race tests and vulnerability scan
-	@echo   build      build binaries into $(BIN_DIR)/
-	@echo   up         start local infrastructure and wait until healthy
-	@echo   down       stop local infrastructure
+	$(info $(HELP))@cd .
 
 .PHONY: hooks
 hooks:

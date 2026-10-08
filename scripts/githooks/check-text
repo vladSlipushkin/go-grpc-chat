@@ -16,7 +16,8 @@ if [ -n "$lines" ]; then
 	status=1
 fi
 
-words_file="$(git rev-parse --git-dir)/info/forbidden-words"
+# --git-path resolves to the shared .git/info even inside a linked worktree.
+words_file=$(git rev-parse --git-path info/forbidden-words)
 if [ -f "$words_file" ]; then
 	patterns=$(grep -Ev '^(#|$)' "$words_file")
 	if [ -n "$patterns" ]; then

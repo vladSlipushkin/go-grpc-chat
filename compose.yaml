@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chat}
       POSTGRES_DB: ${POSTGRES_DB:-chat}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       # Since 18 the image keeps data in /var/lib/postgresql/<major>/docker,
       # so the volume goes on the parent directory, not on .../data.

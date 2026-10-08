@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package auth.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// AuthService registers users and issues access tokens for the chat API.
+service AuthService {
+  // Register creates a user account.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Login exchanges credentials for a short-lived access token.
+  rpc Login(LoginRequest) returns (LoginResponse);
+}
+
+message RegisterRequest {
+  string username = 1 [(buf.validate.field).string = {
+    min_len: 3
+    max_len: 32
+    pattern: "^[A-Za-z0-9_]+$"
+  }];
+  // Passwords are hashed with bcrypt, which only uses the first 72 bytes.
+  // Longer input is rejected instead of being silently truncated. The limit
+  // is in bytes, not characters: non-ASCII characters take several bytes.
+  string password = 2 [(buf.validate.field).string = {
+    min_len: 8
+    max_bytes: 72
+  }];
+}
+
+message RegisterResponse {
+  string user_id = 1;
+}
+
+message LoginRequest {
+  string username = 1 [(buf.validate.field).required = true];
+  string password = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.max_bytes = 72
+  ];
+}
+
+message LoginResponse {
+  // Sent as "authorization: Bearer <token>" metadata on later calls.
+  string access_token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}

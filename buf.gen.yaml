@@ -1,0 +1,17 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  disable:
+    - module: buf.build/bufbuild/protovalidate
+    - module: buf.build/googleapis/googleapis
+  override:
+    - file_option: go_package_prefix
+      value: github.com/vladSlipushkin/go-grpc-chat/gen
+plugins:
+  - local: ["go", "tool", "-modfile=tools/go.mod", "protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "tool", "-modfile=tools/go.mod", "protoc-gen-go-grpc"]
+    out: gen
+    opt: paths=source_relative

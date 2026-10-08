@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Collapsed in diffs and excluded from language stats on GitHub.
+gen/** linguist-generated=true

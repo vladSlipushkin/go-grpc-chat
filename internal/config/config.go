@@ -37,6 +37,10 @@ func Load(lookup LookupFunc) (Config, error) {
 
 	var errs []error
 	if v, ok := lookup("CHAT_GRPC_ADDR"); ok {
+		// An empty address would make the server listen on a random port.
+		if v == "" {
+			errs = append(errs, errors.New("CHAT_GRPC_ADDR: must not be empty"))
+		}
 		cfg.GRPCAddr = v
 	}
 	if v, ok := lookup("CHAT_LOG_LEVEL"); ok {

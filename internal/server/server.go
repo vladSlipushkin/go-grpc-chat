@@ -39,7 +39,7 @@ type Options struct {
 	// Reflection registers the gRPC reflection service.
 	Reflection bool
 	// ShutdownTimeout bounds graceful shutdown; RPCs still running after it
-	// are cancelled.
+	// are cancelled. Zero cancels running RPCs as soon as shutdown starts.
 	ShutdownTimeout time.Duration
 }
 
@@ -52,6 +52,8 @@ type Server struct {
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
 }
+
+var _ grpc.ServiceRegistrar = (*Server)(nil)
 
 // New creates a Server. Services are registered with RegisterService before
 // Serve is called.
@@ -94,19 +96,27 @@ func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
 
 // Serve accepts connections on lis until ctx is cancelled, then shuts down:
 // health checks report NOT_SERVING, new RPCs are refused, and running RPCs
-// get the shutdown timeout to finish before they are cancelled. It returns
-// nil after a shutdown and an error if serving fails on its own.
+// get the shutdown timeout to finish before they are cancelled. If accepting
+// connections fails on its own, Serve shuts down the same way and returns the
+// error. Either way, Serve returns only after every handler has returned, so
+// handlers must return once their context is cancelled.
 func (s *Server) Serve(ctx context.Context, lis net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.grpc.Serve(lis) }()
 
+	// Shutdown runs after ctx is cancelled; it only needs ctx's values.
+	shutdownCtx := context.WithoutCancel(ctx)
+
 	select {
 	case err := <-serveErr:
+		// grpc.Server.Serve closes only the listener; connections it already
+		// accepted keep serving until the server is stopped.
+		s.shutdown(shutdownCtx)
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
 
-	s.shutdown(ctx)
+	s.shutdown(shutdownCtx)
 
 	// Serve returns nil once stopped, or ErrServerStopped if the stop won the
 	// race against it starting.
@@ -117,8 +127,8 @@ func (s *Server) Serve(ctx context.Context, lis net.Listener) error {
 }
 
 func (s *Server) shutdown(ctx context.Context) {
-	// Load balancers watching health stop routing new clients here before
-	// the listener closes.
+	// Health watchers learn first. Clients polling Check see the listener
+	// close at about the same moment; there is no drain delay.
 	s.health.Shutdown()
 	s.logger.InfoContext(ctx, "shutting down", slog.Duration("timeout", s.shutdownTimeout))
 
@@ -133,6 +143,9 @@ func (s *Server) shutdown(ctx context.Context) {
 	case <-time.After(s.shutdownTimeout):
 		s.logger.WarnContext(ctx, "graceful shutdown timed out, cancelling remaining RPCs")
 		s.grpc.Stop()
+		// GracefulStop returns only after every handler has returned, even
+		// once Stop has cancelled them. Waiting here keeps that guarantee for
+		// callers of Serve; Stop alone does not wait for handlers.
 		<-stopped
 	}
 }

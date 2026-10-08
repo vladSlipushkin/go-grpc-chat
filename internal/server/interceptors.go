@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -16,6 +17,8 @@ import (
 // errInternal is what a client sees when a handler panics. Details stay in
 // the server log.
 var errInternal = status.Error(codes.Internal, "internal error")
+
+var healthMethodPrefix = "/" + healthpb.Health_ServiceDesc.ServiceName + "/"
 
 // unaryRecovery turns a panic in a unary handler into an INTERNAL status so
 // one faulty request cannot take the process down.
@@ -85,7 +88,7 @@ func logCall(ctx context.Context, logger *slog.Logger, method string, start time
 // logLevel keeps health probes out of normal logs and makes server-side
 // failures stand out from client errors.
 func logLevel(method string, code codes.Code) slog.Level {
-	if strings.HasPrefix(method, "/grpc.health.v1.Health/") {
+	if strings.HasPrefix(method, healthMethodPrefix) {
 		return slog.LevelDebug
 	}
 	switch code {

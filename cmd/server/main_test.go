@@ -20,8 +20,8 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { errc <- run(ctx, lookup, &out) }()
 
-	// Cancel only once the server is up, so the test covers a full start
-	// and stop rather than racing them.
+	// Cancel once the listener is bound, so the test covers a start that got
+	// past configuration and listening before it stops.
 	waitFor(t, func() bool { return strings.Contains(out.String(), "server started") })
 	cancel()
 

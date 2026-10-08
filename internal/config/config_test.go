@@ -67,6 +67,11 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		wantErr []string
 	}{
 		{
+			name:    "empty address",
+			env:     map[string]string{"CHAT_GRPC_ADDR": ""},
+			wantErr: []string{"CHAT_GRPC_ADDR: must not be empty"},
+		},
+		{
 			name:    "unknown log level",
 			env:     map[string]string{"CHAT_LOG_LEVEL": "verbose"},
 			wantErr: []string{"CHAT_LOG_LEVEL"},

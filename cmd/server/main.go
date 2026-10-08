@@ -28,6 +28,9 @@ func main() {
 func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// After the first signal, restore default handling so a second one kills
+	// the process if graceful shutdown hangs.
+	context.AfterFunc(ctx, stop)
 
 	cfg, err := config.Load(lookupEnv)
 	if err != nil {

@@ -157,7 +157,41 @@ func TestChatContract(t *testing.T) {
 		{
 			name: "empty message text",
 			msg:  send(""),
-			want: []string{"send_message.text:string.min_len"},
+			want: []string{"send_message.text:string.min_len", "send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of spaces",
+			msg:  send("   \t\n"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of no-break and ideographic spaces",
+			msg:  send("\u00a0\u3000"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of a zero-width space",
+			msg:  send("\u200b"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text of a bidi override",
+			msg:  send("\u202e"),
+			want: []string{"send_message.text:string.pattern"},
+		},
+		{
+			name: "message text padded with spaces",
+			msg:  send("  hi "),
+		},
+		{
+			// Known limitation: the filler is a letter (Lo), so the rule lets it
+			// through even though it renders as blank. See ADR-0003.
+			name: "message text of a Hangul filler passes",
+			msg:  send("\u3164"),
+		},
+		{
+			name: "message text of an emoji",
+			msg:  send("\U0001F44D"),
 		},
 		{
 			name: "message text at byte limit",

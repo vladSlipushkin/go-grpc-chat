@@ -29,6 +29,15 @@ files.
 - CI regenerates the code and fails if `gen/` changes.
 - `.gitattributes` marks `gen/` as `linguist-generated`, so GitHub collapses
   it in diffs and leaves it out of language statistics.
+- Breaking-change detection uses buf's `FILE` category, the strictest one.
+  Because `gen/` is a Go SDK, renaming a field or message breaks consumers'
+  code even when the wire format stays compatible: `WIRE` would let a field
+  rename through, and `WIRE_JSON` a message rename.
+
+Rejected: a separate Go module for `gen/`. It would give SDK users a smaller
+dependency graph, since today they also pull in everything the server
+requires, but it needs its own versioning and release tags, and a `replace`
+or `go.work` during development. Worth revisiting if the SDK gets external users.
 
 ## Consequences
 
@@ -42,5 +51,6 @@ files.
   generated files, so those PRs fail the drift check until `make gen` is run
   on their branch.
 - `protoc-gen-go` in `tools/go.mod` must not be newer than
-  `google.golang.org/protobuf` in the root `go.mod`; generated code refuses to
-  run against an older runtime. Bump the runtime first.
+  `google.golang.org/protobuf` in the root `go.mod`; generated code fails to
+  compile against an older runtime (`protoimpl.EnforceVersion`). Bump the
+  runtime first.

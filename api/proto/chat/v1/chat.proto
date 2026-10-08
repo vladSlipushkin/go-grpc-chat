@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package chat.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+// ChatService carries all chat traffic of a client over one bidirectional
+// stream. Delivery guarantees, error semantics and limits are described in
+// docs/adr/0003-chat-stream-protocol.md.
+service ChatService {
+  // Connect opens a chat session. The access token is sent once, as
+  // "authorization: Bearer <token>" metadata, when the stream is opened. The
+  // stream ends with UNAUTHENTICATED when the token expires.
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+}
+
+// ConnectRequest is one client action.
+message ConnectRequest {
+  // Client-chosen id, echoed back in the Ack or Error for this request. It
+  // only correlates replies with requests; it is not an idempotency key.
+  string request_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 64
+  }];
+
+  oneof action {
+    option (buf.validate.oneof).required = true;
+
+    JoinRoom join_room = 2;
+    LeaveRoom leave_room = 3;
+    SendMessage send_message = 4;
+  }
+}
+
+// JoinRoom subscribes the connection to a room; the room is created on first
+// join. Joining a room the connection is already in is acknowledged as a
+// no-op. A connection can be in at most 16 rooms at once; going over the
+// limit fails with RESOURCE_EXHAUSTED.
+message JoinRoom {
+  string room_id = 1 [(buf.validate.field).string = {
+    max_len: 64
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+  }];
+}
+
+// LeaveRoom unsubscribes the connection from a room. Leaving a room the
+// connection is not in is acknowledged as a no-op, so join and leave can both
+// be retried safely.
+message LeaveRoom {
+  string room_id = 1 [(buf.validate.field).string = {
+    max_len: 64
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+  }];
+}
+
+// SendMessage posts text to a room the connection has joined; otherwise it
+// fails with FAILED_PRECONDITION. The sender is taken from the access token.
+message SendMessage {
+  string room_id = 1 [(buf.validate.field).string = {
+    max_len: 64
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+  }];
+  // The limit is in bytes so that server memory per queued message is
+  // bounded regardless of script: 4096 ASCII or about 2048 Cyrillic letters.
+  string text = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_bytes: 4096
+  }];
+}
+
+// ConnectResponse is one server event. New event types may be added over
+// time; clients must ignore events they do not recognise.
+message ConnectResponse {
+  oneof event {
+    Ack ack = 1;
+    Error error = 2;
+    Message message = 3;
+  }
+}
+
+// Ack confirms that a request was applied.
+message Ack {
+  string request_id = 1;
+  // Set only for SendMessage. The message itself is also delivered to the
+  // sender as a regular Message event, possibly before this Ack; the id links
+  // the two.
+  string message_id = 2;
+}
+
+// Error reports a failed request. The stream stays open; errors that affect
+// the whole connection end the stream with a gRPC status instead.
+message Error {
+  // Empty when the failed request had no valid request_id.
+  string request_id = 1;
+  google.rpc.Status status = 2;
+}
+
+// Message is a chat message delivered to every member of its room.
+message Message {
+  string id = 1;
+  string room_id = 2;
+  string sender_id = 3;
+  string sender_username = 4;
+  string text = 5;
+  google.protobuf.Timestamp sent_at = 6;
+}

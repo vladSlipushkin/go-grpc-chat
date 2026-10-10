@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/server"
 )
 
@@ -85,7 +86,10 @@ func TestPanicInRegisteredServiceIsRecoveredAndLogged(t *testing.T) {
 	t.Parallel()
 
 	var logs lockedBuffer
-	srv := server.New(slog.New(slog.NewJSONHandler(&logs, nil)), server.Options{ShutdownTimeout: time.Second})
+	srv := server.New(slog.New(slog.NewJSONHandler(&logs, nil)), rejectTokens{}, server.Options{
+		ShutdownTimeout: time.Second,
+		PublicServices:  []string{panicServiceDesc.ServiceName},
+	})
 	srv.RegisterService(&panicServiceDesc, struct{}{})
 	ts := startServer(t, srv)
 
@@ -215,8 +219,14 @@ type testServer struct {
 }
 
 func newServer(opts server.Options) *server.Server {
-	return server.New(slog.New(slog.DiscardHandler), opts)
+	return server.New(slog.New(slog.DiscardHandler), rejectTokens{}, opts)
 }
+
+// rejectTokens is a server.TokenVerifier for tests that only call public
+// methods.
+type rejectTokens struct{}
+
+func (rejectTokens) Verify(string) (auth.Claims, error) { return auth.Claims{}, auth.ErrInvalidToken }
 
 // startServer serves srv over an in-memory listener. stop cancels it and
 // returns what Serve returned; cleanup also calls it, so every test ends with

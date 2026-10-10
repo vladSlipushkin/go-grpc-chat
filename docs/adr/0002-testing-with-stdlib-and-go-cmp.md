@@ -32,6 +32,32 @@ values are too complex for `==`.
 - No mocking framework. Dependencies are small interfaces satisfied by
   hand-written fakes in tests.
 
+### Concurrency, transport and time
+
+- Every package whose tests start goroutines runs
+  `goleak.VerifyTestMain`. A goroutine still running after the last test
+  fails the package, which catches handlers, rooms or server loops that do
+  not stop.
+- gRPC behaviour is tested against a real server over `bufconn`: an
+  in-memory listener with real HTTP/2 framing, interceptors, status codes
+  and metadata, but no ports and no network. Tests call methods through
+  generated clients, or through hand-written `grpc.ServiceDesc` values when
+  a method exists only for the test.
+- Code of our own that depends on time (room goroutines, token expiry) is
+  tested inside `testing/synctest` bubbles. Time there is fake and advances
+  only when every goroutine in the bubble is blocked, so a test of a
+  one-hour expiry runs instantly and asserts exact instants instead of
+  ranges.
+- Tests that run a grpc-go server use real time: grpc-go starts goroutines
+  and timers that cannot be moved into a bubble. There:
+  - nothing is synchronized with `time.Sleep`; tests wait on channels,
+    stream events or a polled condition;
+  - waits for something that must happen are capped generously (5 seconds)
+    and only fail a test that hangs;
+  - a short server timeout (200 ms) is allowed only to cut a wait short when
+    what it races against is in-process work taking microseconds, a margin
+    of several orders of magnitude even under the race detector.
+
 ## Consequences
 
 - Checks are more verbose than testify one-liners.

@@ -54,6 +54,28 @@ a handler that ignores cancellation would hang shutdown. As a safety net, the
 first SIGINT or SIGTERM restores default signal handling, so a second one
 kills the process.
 
+This holds when the server runs as PID 1 in a container. The kernel does
+not deliver signals with the default action to PID 1, but the Go runtime
+keeps its own handler for SIGINT and SIGTERM; when no channel is notified,
+it re-raises the signal and, if that did nothing, exits with status
+128 + signal (`dieFromSignal` in `runtime/signal_unix.go`). No init process
+is needed for signal handling.
+
+The orchestrator's grace period must be longer than the shutdown timeout,
+otherwise it kills the process before `Stop` gets to cancel running RPCs:
+`docker stop` waits 10 seconds by default, exactly the default timeout here.
+The packaging stage sets `stop_grace_period` in Compose (and
+`terminationGracePeriodSeconds` for Kubernetes) with a margin over
+`CHAT_SHUTDOWN_TIMEOUT`. Behind a load balancer the missing drain delay
+means clients can still be routed to the server for a moment after it
+stops listening; a pause before `GracefulStop` would cover that and is
+deferred to the same stage.
+
+Rejected: `grpc.WaitForHandlers(true)` with a single `Stop`. It makes `Stop`
+wait for handlers, which `GracefulStop` already does, and it is still marked
+experimental. `Stop` alone also skips the drain phase, cutting off streams
+that would have finished within the timeout.
+
 If accepting connections fails on its own, the server shuts down the same
 way before reporting the error: closing the listener alone would leave
 already accepted connections running.
@@ -95,6 +117,15 @@ go-grpc-middleware is the standard collection of such interceptors. It is
 not used because the two needed here are short, and writing them keeps the
 interceptor mechanics visible in the code that the authentication
 interceptors will follow.
+
+### Service registration
+
+Services are registered on the `Server` before `Serve` is called. grpc-go
+treats a registration after `Serve`, or a duplicate one, as a programming
+error and calls `log.Fatalf`, which exits the process without running
+deferred functions. All registration therefore happens in the composition
+root (`cmd/server`) between `New` and `Serve`, never from handlers or
+background goroutines.
 
 ### Reflection
 

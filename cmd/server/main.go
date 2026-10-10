@@ -11,7 +11,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	authv1 "github.com/vladSlipushkin/go-grpc-chat/gen/auth/v1"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/config"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/grpcapi"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/memory"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/server"
 )
 
@@ -39,6 +43,15 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer) err
 
 	logger := slog.New(slog.NewJSONHandler(stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
+	tokens, err := auth.NewTokens(cfg.JWTSecret, cfg.TokenTTL)
+	if err != nil {
+		return fmt.Errorf("create token issuer: %w", err)
+	}
+	accounts, err := auth.NewService(memory.NewUsers(), tokens, auth.Options{})
+	if err != nil {
+		return fmt.Errorf("create auth service: %w", err)
+	}
+
 	var lc net.ListenConfig
 	lis, err := lc.Listen(ctx, "tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -46,10 +59,13 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer) err
 	}
 
 	// Interceptors built by New take each call's context from the call itself.
-	srv := server.New(logger, server.Options{ //nolint:contextcheck // false positive, see above
+	srv := server.New(logger, tokens, server.Options{ //nolint:contextcheck // false positive, see above
 		Reflection:      cfg.Reflection,
 		ShutdownTimeout: cfg.ShutdownTimeout,
+		PublicServices:  []string{authv1.AuthService_ServiceDesc.ServiceName},
 	})
+	// Every service is registered here, before Serve (ADR-0006).
+	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(accounts, logger))
 
 	logger.InfoContext(ctx, "server started",
 		slog.String("addr", lis.Addr().String()),

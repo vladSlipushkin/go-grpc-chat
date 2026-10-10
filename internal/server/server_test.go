@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"slices"
@@ -268,7 +270,9 @@ func listServices(ctx context.Context, conn *grpc.ClientConn) ([]string, error) 
 	req := &reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{},
 	}
-	if err := stream.Send(req); err != nil {
+	// Send returns io.EOF when the server has already ended the stream, for
+	// example with UNIMPLEMENTED; the status itself comes from Recv.
+	if err := stream.Send(req); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	resp, err := stream.Recv()

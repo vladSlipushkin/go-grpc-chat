@@ -185,9 +185,11 @@ until `ListMessages` exists. Clients can use `expires_at` from `Login` to
 reconnect before expiry instead of after it.
 
 No clock-skew leeway is applied: the same server issues and verifies tokens,
-so they share one clock. With several instances, verification would accept a
-small leeway (about 30 seconds) while the stream deadline stays at the exact
-expiry.
+so they share one clock. Expiry stays exact even with several instances, so
+a token is never accepted after its `exp` anywhere; a small leeway (about
+30 seconds) would then apply only to `iat` and `nbf`, so a token issued by an
+instance whose clock runs slightly ahead is not rejected as issued in the
+future. ADR-0007 covers the token format.
 
 Rejected: verifying the token at open with no deadline on the stream, which
 lets a session outlive its token indefinitely; renewing the token inside the

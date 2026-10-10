@@ -15,6 +15,8 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
+	reflectionpb "google.golang.org/grpc/reflection/grpc_reflection_v1"
+	reflectionv1alphapb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 )
 
 const (
@@ -41,9 +43,14 @@ type Options struct {
 	// ShutdownTimeout bounds graceful shutdown; RPCs still running after it
 	// are cancelled. Zero cancels running RPCs as soon as shutdown starts.
 	ShutdownTimeout time.Duration
+	// PublicServices are full service names callable without an access
+	// token, such as "auth.v1.AuthService". Health checking and reflection
+	// are always public.
+	PublicServices []string
 }
 
-// Server is a gRPC server with health checking, logging and panic recovery.
+// Server is a gRPC server with health checking, logging, panic recovery,
+// authentication and request validation.
 // It implements grpc.ServiceRegistrar, so generated Register functions accept
 // it directly.
 type Server struct {
@@ -55,9 +62,18 @@ type Server struct {
 
 var _ grpc.ServiceRegistrar = (*Server)(nil)
 
-// New creates a Server. Services are registered with RegisterService before
-// Serve is called.
-func New(logger *slog.Logger, opts Options) *Server {
+// New creates a Server that checks access tokens with verifier. Services are
+// registered with RegisterService before Serve is called.
+func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
+	public := publicServices{
+		healthpb.Health_ServiceDesc.ServiceName:                      true,
+		reflectionpb.ServerReflection_ServiceDesc.ServiceName:        true,
+		reflectionv1alphapb.ServerReflection_ServiceDesc.ServiceName: true,
+	}
+	for _, name := range opts.PublicServices {
+		public[name] = true
+	}
+
 	g := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -68,10 +84,22 @@ func New(logger *slog.Logger, opts Options) *Server {
 			MinTime:             minClientPingInterval,
 			PermitWithoutStream: true,
 		}),
-		// Logging runs outside recovery so a recovered panic is logged with
-		// the INTERNAL code the client receives.
-		grpc.ChainUnaryInterceptor(unaryLogging(logger), unaryRecovery(logger)),
-		grpc.ChainStreamInterceptor(streamLogging(logger), streamRecovery(logger)),
+		// The first interceptor is the outermost. Logging runs outside
+		// recovery so a recovered panic is logged with the INTERNAL code the
+		// client receives, and outside auth so rejected calls are logged
+		// too. Validation runs after auth, so unauthenticated callers learn
+		// nothing about request rules of protected methods (ADR-0007).
+		grpc.ChainUnaryInterceptor(
+			unaryLogging(logger),
+			unaryRecovery(logger),
+			unaryAuth(verifier, public),
+			unaryValidation(logger),
+		),
+		grpc.ChainStreamInterceptor(
+			streamLogging(logger),
+			streamRecovery(logger),
+			streamAuth(verifier, public),
+		),
 	)
 
 	h := health.NewServer()

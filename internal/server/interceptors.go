@@ -55,12 +55,33 @@ func logPanic(ctx context.Context, logger *slog.Logger, method string, r any) {
 	)
 }
 
+// callInfo collects what inner interceptors learn about a call, so the
+// record logging writes when the call ends can include it. Interceptors run
+// on the call's goroutine before and after the handler, so no locking is
+// needed.
+type callInfo struct {
+	userID string
+}
+
+type callInfoKey struct{}
+
+func withCallInfo(ctx context.Context) (context.Context, *callInfo) {
+	ci := &callInfo{}
+	return context.WithValue(ctx, callInfoKey{}, ci), ci
+}
+
+func callInfoFrom(ctx context.Context) *callInfo {
+	ci, _ := ctx.Value(callInfoKey{}).(*callInfo)
+	return ci
+}
+
 // unaryLogging records the outcome of every unary call.
 func unaryLogging(logger *slog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
+		ctx, ci := withCallInfo(ctx)
 		resp, err := handler(ctx, req)
-		logCall(ctx, logger, info.FullMethod, start, err)
+		logCall(ctx, logger, info.FullMethod, start, ci, err)
 		return resp, err
 	}
 }
@@ -69,20 +90,38 @@ func unaryLogging(logger *slog.Logger) grpc.UnaryServerInterceptor {
 func streamLogging(logger *slog.Logger) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		start := time.Now()
-		err := handler(srv, ss)
-		logCall(ss.Context(), logger, info.FullMethod, start, err)
+		ctx, ci := withCallInfo(ss.Context())
+		err := handler(srv, &serverStream{ServerStream: ss, ctx: ctx})
+		logCall(ctx, logger, info.FullMethod, start, ci, err)
 		return err
 	}
 }
 
-func logCall(ctx context.Context, logger *slog.Logger, method string, start time.Time, err error) {
-	code := status.Code(err)
-	logger.LogAttrs(ctx, logLevel(method, code), "rpc finished",
+// logCall never logs request contents or metadata: they carry passwords
+// and access tokens.
+func logCall(ctx context.Context, logger *slog.Logger, method string, start time.Time, ci *callInfo, err error) {
+	code := statusCode(err)
+	attrs := []slog.Attr{
 		slog.String("method", method),
 		slog.String("code", code.String()),
 		slog.Duration("duration", time.Since(start)),
 		slog.String("peer", peerAddr(ctx)),
-	)
+	}
+	if ci.userID != "" {
+		attrs = append(attrs, slog.String("user_id", ci.userID))
+	}
+	logger.LogAttrs(ctx, logLevel(method, code), "rpc finished", attrs...)
+}
+
+// statusCode returns the code the client receives for err. A handler that
+// returns a bare context error is reported as CANCELLED or
+// DEADLINE_EXCEEDED: grpc-go converts it after the interceptors run, and
+// status.Code alone would see UNKNOWN.
+func statusCode(err error) codes.Code {
+	if st, ok := status.FromError(err); ok {
+		return st.Code()
+	}
+	return status.FromContextError(err).Code()
 }
 
 // logLevel keeps health probes out of normal logs and makes server-side
@@ -100,6 +139,15 @@ func logLevel(method string, code codes.Code) slog.Level {
 		return slog.LevelWarn
 	}
 }
+
+// serverStream replaces the context of a grpc.ServerStream, so interceptors
+// can pass values and deadlines to the handler.
+type serverStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *serverStream) Context() context.Context { return s.ctx }
 
 func peerAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {

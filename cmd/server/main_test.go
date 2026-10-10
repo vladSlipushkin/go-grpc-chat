@@ -18,7 +18,10 @@ func TestMain(m *testing.M) {
 func TestRunServesUntilCancelled(t *testing.T) {
 	t.Parallel()
 
-	env := map[string]string{"CHAT_GRPC_ADDR": "127.0.0.1:0"}
+	env := map[string]string{
+		"CHAT_GRPC_ADDR":  "127.0.0.1:0",
+		"CHAT_JWT_SECRET": "0123456789abcdef0123456789abcdef",
+	}
 	lookup := func(key string) (string, bool) { v, ok := env[key]; return v, ok }
 
 	ctx, cancel := context.WithCancel(t.Context())

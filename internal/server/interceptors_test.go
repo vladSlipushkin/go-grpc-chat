@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"testing"
@@ -94,6 +95,20 @@ func TestLoggingRecordsOutcome(t *testing.T) {
 			err:       errors.New("database is down"),
 			wantLevel: "ERROR",
 			wantCode:  "Unknown",
+		},
+		{
+			name:      "client cancelled",
+			method:    "/chat.v1.ChatService/Connect",
+			err:       context.Canceled,
+			wantLevel: "INFO",
+			wantCode:  "Canceled",
+		},
+		{
+			name:      "client deadline",
+			method:    "/auth.v1.AuthService/Login",
+			err:       fmt.Errorf("wait for room: %w", context.DeadlineExceeded),
+			wantLevel: "WARN",
+			wantCode:  "DeadlineExceeded",
 		},
 		{
 			name:      "health probe",

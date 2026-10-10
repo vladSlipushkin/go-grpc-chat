@@ -19,9 +19,10 @@ grpcurl.
 ### Configuration
 
 Settings come from environment variables (`CHAT_GRPC_ADDR`,
-`CHAT_LOG_LEVEL`, `CHAT_SHUTDOWN_TIMEOUT`, `CHAT_REFLECTION`), parsed with the
+`CHAT_LOG_LEVEL`, `CHAT_SHUTDOWN_TIMEOUT`, `CHAT_REFLECTION`, and
+`CHAT_JWT_SECRET` and `CHAT_TOKEN_TTL` from ADR-0007), parsed with the
 standard library. Every invalid variable is reported at once and the process
-refuses to start. A configuration library would save a few lines for four
+refuses to start. A configuration library would save a few lines for six
 settings at the cost of a dependency.
 
 ### Shutdown
@@ -100,11 +101,16 @@ already accepted connections running.
 ### Interceptors
 
 Every unary and streaming call passes through two interceptors written for
-this project:
+this project, followed by authentication and request validation
+(ADR-0007):
 
 - recovery turns a panic into `INTERNAL` with a generic message for the
   client and logs the panic with its stack;
-- logging records method, status code, duration and peer when the call ends.
+- logging records method, status code, duration, peer and, for
+  authenticated calls, the user id when the call ends. A handler that
+  returns a bare context error is logged as `CANCELLED` or
+  `DEADLINE_EXCEEDED`, the code grpc-go sends the client for it, not as
+  `UNKNOWN`.
   Calls ending with server-side codes (`INTERNAL`, `UNKNOWN`, `DATA_LOSS`,
   `UNIMPLEMENTED`) are logged as errors, cancelled calls as information like
   successful ones, other failures as warnings, and health checks only at

@@ -105,14 +105,20 @@ func TestAuthErrors(t *testing.T) {
 		t.Errorf("Register() with a taken name: code = %v, want %v", code, codes.AlreadyExists)
 	}
 
-	for _, req := range []*authv1.LoginRequest{
-		{Username: username, Password: "wrong password"},
-		{Username: "nobody", Password: password},
-	} {
-		_, err := client.Login(t.Context(), req)
-		if st := status.Convert(err); st.Code() != codes.Unauthenticated || st.Message() != "invalid username or password" {
-			t.Errorf("Login(%q) = %v, want UNAUTHENTICATED with the shared message", req.GetUsername(), err)
-		}
+	logins := []struct {
+		name string
+		req  *authv1.LoginRequest
+	}{
+		{name: "wrong password", req: &authv1.LoginRequest{Username: username, Password: "wrong password"}},
+		{name: "unknown user", req: &authv1.LoginRequest{Username: "nobody", Password: password}},
+	}
+	for _, tt := range logins {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.Login(t.Context(), tt.req)
+			if st := status.Convert(err); st.Code() != codes.Unauthenticated || st.Message() != "invalid username or password" {
+				t.Errorf("Login() = %v, want UNAUTHENTICATED with the shared message", err)
+			}
+		})
 	}
 
 	_, err = client.Register(t.Context(), &authv1.RegisterRequest{Username: "Bad Name", Password: password})
@@ -228,6 +234,8 @@ var privateServiceDesc = grpc.ServiceDesc{
 		StreamName:    "Echo",
 		ClientStreams: true,
 		ServerStreams: true,
+		// Echo does not watch its context; it ends when the client closes
+		// its side. A real handler must also return on ctx.Done().
 		Handler: func(srv any, stream grpc.ServerStream) error {
 			if err := srv.(*privateService).record(stream.Context()); err != nil {
 				return err
@@ -276,9 +284,17 @@ func startServer(t *testing.T) testEnv {
 	srv.RegisterService(&privateServiceDesc, private)
 
 	lis := bufconn.Listen(1 << 20)
+	// Not t.Context(): it is cancelled before cleanups run, which would stop
+	// the server while the client is still open.
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ctx, lis) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	})
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -287,16 +303,13 @@ func startServer(t *testing.T) testEnv {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
-		cancel()
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	// Cleanups run last-in first-out: the client closes before the server
+	// stops, which also ends streams like Echo that ignore their context.
 	t.Cleanup(func() {
 		if err := conn.Close(); err != nil {
 			t.Errorf("close client: %v", err)
-		}
-		cancel()
-		if err := <-served; err != nil {
-			t.Errorf("Serve() = %v", err)
 		}
 	})
 	return testEnv{conn: conn, private: private, logs: logs}

@@ -126,7 +126,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (Token, 
 
 	value, exp, err := s.tokens.Issue(u.ID, u.Username)
 	if err != nil {
-		return Token{}, err
+		return Token{}, fmt.Errorf("issue token: %w", err)
 	}
 	return Token{Value: value, ExpiresAt: exp}, nil
 }

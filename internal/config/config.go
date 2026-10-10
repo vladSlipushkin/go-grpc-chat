@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strconv"
 	"time"
+
+	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
 )
 
 // Config holds the server settings.
@@ -26,10 +28,6 @@ type Config struct {
 	// TokenTTL is how long an access token stays valid.
 	TokenTTL time.Duration
 }
-
-// minJWTSecretBytes matches auth.MinSecretBytes: HS256 needs a key at least
-// as long as its 256-bit output.
-const minJWTSecretBytes = 32
 
 // LookupFunc reports the value of an environment variable and whether it is
 // set. os.LookupEnv satisfies it.
@@ -77,8 +75,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	switch v, _ := lookup("CHAT_JWT_SECRET"); {
 	case v == "":
 		errs = append(errs, errors.New("CHAT_JWT_SECRET: must be set"))
-	case len(v) < minJWTSecretBytes:
-		errs = append(errs, fmt.Errorf("CHAT_JWT_SECRET: must be at least %d bytes, got %d", minJWTSecretBytes, len(v)))
+	case len(v) < auth.MinSecretBytes:
+		errs = append(errs, fmt.Errorf("CHAT_JWT_SECRET: must be at least %d bytes, got %d", auth.MinSecretBytes, len(v)))
 	default:
 		cfg.JWTSecret = []byte(v)
 	}

@@ -140,6 +140,15 @@ func logLevel(method string, code codes.Code) slog.Level {
 	}
 }
 
+// serverStream replaces the context of a grpc.ServerStream, so interceptors
+// can pass values and deadlines to the handler.
+type serverStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *serverStream) Context() context.Context { return s.ctx }
+
 func peerAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
 		return p.Addr.String()

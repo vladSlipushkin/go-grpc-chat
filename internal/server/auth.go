@@ -30,13 +30,15 @@ var (
 	errInvalidToken = status.Error(codes.Unauthenticated, "invalid access token")
 	// errExpiredToken carries the TOKEN_EXPIRED reason from ADR-0003, so a
 	// client knows to log in again rather than treat its token as forged.
-	errExpiredToken = withErrorInfo(codes.Unauthenticated, "access token expired", "TOKEN_EXPIRED")
+	errExpiredToken = mustErrorInfo(codes.Unauthenticated, "access token expired", "TOKEN_EXPIRED")
 )
 
 // errorDomain is the ErrorInfo domain of the chat API (ADR-0003).
 const errorDomain = "chat.v1"
 
-func withErrorInfo(code codes.Code, msg, reason string) error {
+// mustErrorInfo builds a status with an ErrorInfo detail for package-level
+// errors and panics if it cannot, like regexp.MustCompile.
+func mustErrorInfo(code codes.Code, msg, reason string) error {
 	st, err := status.New(code, msg).WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: errorDomain})
 	if err != nil {
 		// WithDetails fails only if the detail cannot be marshalled, which
@@ -72,6 +74,12 @@ func unaryAuth(verifier TokenVerifier, public publicServices) grpc.UnaryServerIn
 // streamAuth is unaryAuth for streams. The token is checked once, when the
 // stream opens; the stream's context then ends when the token expires, and
 // the stream ends with UNAUTHENTICATED and reason TOKEN_EXPIRED (ADR-0003).
+//
+// Expiry only cancels the context: RecvMsg and SendMsg blocked on the
+// transport do not return until the handler does. Handlers must therefore
+// watch ss.Context().Done() and return when it fires, without first waiting
+// for a goroutine blocked in RecvMsg; that goroutine is released once the
+// handler has returned and the stream is closed.
 func streamAuth(verifier TokenVerifier, public publicServices) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		if public.allows(info.FullMethod) {
@@ -125,11 +133,3 @@ func bearerToken(ctx context.Context) (string, bool) {
 	}
 	return token, true
 }
-
-// serverStream replaces the context of a grpc.ServerStream.
-type serverStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s *serverStream) Context() context.Context { return s.ctx }

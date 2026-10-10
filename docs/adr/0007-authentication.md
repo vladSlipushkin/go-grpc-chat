@@ -86,6 +86,12 @@ logging, recovery, auth. The first interceptor is the outermost.
   returns and the cause is `errTokenExpired`, the stream ends with
   `UNAUTHENTICATED` and reason `TOKEN_EXPIRED`; a client cancelling or its
   own shorter deadline keep their own status.
+- Expiry cancels the context only; a `RecvMsg` or `SendMsg` blocked on the
+  transport does not return until the handler does. Stream handlers must
+  watch the context in their main goroutine and return when it ends,
+  without first waiting for a reader blocked in `RecvMsg`, which is released
+  once the handler returns. The chat stream handler is tested for this with
+  a client that stays silent past its token's expiry.
 - An expired token on a unary call carries the same `TOKEN_EXPIRED` reason.
 - Logging puts a small holder in the context that auth fills with the user
   id, so the record written when the call ends includes `user_id`. Logging

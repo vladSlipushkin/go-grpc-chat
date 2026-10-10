@@ -35,7 +35,7 @@ Usage: make TARGET
   proto-breaking  check contracts for breaking changes against local main
   check           lint, proto-lint, race tests and vulnerability scan
   build           build binaries into $(BIN_DIR)/
-  run             run the server locally with reflection enabled
+  run             run the server locally with reflection and a dev JWT secret
   up              start local infrastructure and wait until healthy
   down            stop local infrastructure
 endef
@@ -94,6 +94,8 @@ build:
 # "VAR=value command" syntax would not do under cmd.exe.
 .PHONY: run
 run: export CHAT_REFLECTION ?= true
+# A fixed, public value for local runs only; deployments must set their own.
+run: export CHAT_JWT_SECRET ?= insecure-local-development-secret-0123456789
 run:
 	go run ./cmd/server
 

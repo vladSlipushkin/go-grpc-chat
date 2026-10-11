@@ -17,25 +17,29 @@ import (
 // lock once no session holds it, so a join can never reach a room that is
 // stopping.
 type Hub struct {
-	logger *slog.Logger
-	rooms  sync.WaitGroup
+	logger  *slog.Logger
+	running sync.WaitGroup
 
 	mu     sync.Mutex
-	byID   map[string]*room
+	rooms  map[string]*room
 	closed bool
 }
 
 // NewHub returns an empty hub that logs room failures to logger.
 func NewHub(logger *slog.Logger) *Hub {
-	return &Hub{logger: logger, byID: make(map[string]*room)}
+	return &Hub{logger: logger, rooms: make(map[string]*room)}
 }
 
 // Connect opens a session for the user authenticated in ctx; the sender of
 // every message the session sends is that user. end is called with the
 // cause when the hub drops the session (ErrSlowClient, ErrRoomFailed,
 // ErrHubClosed): the caller derives it with context.WithCancelCause and
-// stops serving the session when that context ends.
+// stops serving the session when that context ends. end must not be nil.
 func (h *Hub) Connect(ctx context.Context, end context.CancelCauseFunc) (*Session, error) {
+	if end == nil {
+		// A nil end would only fail later, on a room's goroutine.
+		panic("chat: Connect called with a nil end function")
+	}
 	claims, ok := auth.FromContext(ctx)
 	if !ok {
 		return nil, ErrNoUser
@@ -61,11 +65,11 @@ func (h *Hub) Connect(ctx context.Context, end context.CancelCauseFunc) (*Sessio
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true
-	for _, r := range h.byID {
+	for _, r := range h.rooms {
 		h.stopLocked(r)
 	}
 	h.mu.Unlock()
-	h.rooms.Wait()
+	h.running.Wait()
 }
 
 // acquire returns the room with id, starting it if needed, and counts the
@@ -76,11 +80,11 @@ func (h *Hub) acquire(id string) (*room, error) {
 	if h.closed {
 		return nil, ErrHubClosed
 	}
-	r, ok := h.byID[id]
+	r, ok := h.rooms[id]
 	if !ok {
 		r = newRoom(id, h)
-		h.byID[id] = r
-		h.rooms.Go(r.run)
+		h.rooms[id] = r
+		h.running.Go(r.run)
 	}
 	r.holders++
 	return r, nil
@@ -110,8 +114,8 @@ func (h *Hub) stopLocked(r *room) {
 		return
 	}
 	r.stopped = true
-	if h.byID[r.id] == r {
-		delete(h.byID, r.id)
+	if h.rooms[r.id] == r {
+		delete(h.rooms, r.id)
 	}
 	close(r.stop)
 }

@@ -54,8 +54,10 @@ func (r *room) run() {
 				slog.String("stack", string(debug.Stack())),
 			)
 			r.err = ErrRoomFailed
-			r.endAll(ErrRoomFailed)
+			// Out of the registry first, so new joins start a fresh room
+			// instead of waiting on this one.
 			r.hub.retire(r)
+			r.endAll(ErrRoomFailed)
 		}
 	}()
 
@@ -64,7 +66,9 @@ func (r *room) run() {
 		case cmd := <-r.inbox:
 			cmd()
 		case <-r.stop:
-			// The hub stops a room with members only when it closes.
+			// A room stopped because its last holder left has no members
+			// and nobody waiting on it; one that still has members is
+			// being stopped by Hub.Close.
 			r.err = ErrHubClosed
 			r.endAll(ErrHubClosed)
 			return
@@ -73,13 +77,18 @@ func (r *room) run() {
 }
 
 // do runs cmd on the room's goroutine and waits until it has run. It
-// returns ctx's error if ctx ends before the room accepts cmd, or the
-// room's error if the room is gone.
+// returns nil if and only if cmd ran: ctx's error if ctx ends before the
+// room accepts cmd, or the room's error if the room is gone first.
 //
 // Once the room has accepted cmd, do waits for it regardless of ctx:
 // commands never block, so the wait is short, and giving up halfway would
 // leave the caller not knowing whether, say, its join was applied.
 func (r *room) do(ctx context.Context, cmd func()) error {
+	// Checked first so that a context that has already ended always wins;
+	// the select below picks at random among ready cases.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ran := make(chan struct{})
 	select {
 	case r.inbox <- func() { cmd(); close(ran) }:
@@ -92,7 +101,14 @@ func (r *room) do(ctx context.Context, cmd func()) error {
 	case <-ran:
 		return nil
 	case <-r.done:
-		return r.err
+		// The room may have run cmd and then stopped before this select;
+		// cmd's effects stand, so report it as run.
+		select {
+		case <-ran:
+			return nil
+		default:
+			return r.err
+		}
 	}
 }
 

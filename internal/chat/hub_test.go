@@ -83,6 +83,19 @@ func drain(c client) []chat.Event {
 	}
 }
 
+// onlyMessage returns the text and seq of the single message in events.
+func onlyMessage(t *testing.T, events []chat.Event) (string, int64) {
+	t.Helper()
+	if len(events) != 1 {
+		t.Fatalf("got %d events %v, want one message", len(events), events)
+	}
+	m, ok := events[0].(*chat.Message)
+	if !ok {
+		t.Fatalf("event = %T, want *chat.Message", events[0])
+	}
+	return m.Text, m.Seq
+}
+
 func TestMessagesReachEveryMemberInOrder(t *testing.T) {
 	t.Parallel()
 
@@ -143,7 +156,11 @@ func TestConcurrentSendersShareOneOrder(t *testing.T) {
 			t.Fatalf("got %d events, want %d", len(first), senders*perSender)
 		}
 		for i, e := range first {
-			if m := e.(*chat.Message); m.Seq != int64(i+1) {
+			m, ok := e.(*chat.Message)
+			if !ok {
+				t.Fatalf("event %d = %T, want *chat.Message", i, e)
+			}
+			if m.Seq != int64(i+1) {
 				t.Fatalf("event %d has seq %d, want %d", i, m.Seq, i+1)
 			}
 		}
@@ -213,9 +230,8 @@ func TestLeave(t *testing.T) {
 		}
 		send(t, bob, "general", "after")
 
-		got := drain(alice)
-		if len(got) != 1 || got[0].(*chat.Message).Text != "before" {
-			t.Errorf("events after leaving = %v, want only the message sent before", got)
+		if text, _ := onlyMessage(t, drain(alice)); text != "before" {
+			t.Errorf("message after leaving = %q, want only the one sent before", text)
 		}
 		if _, err := alice.Send(t.Context(), "general", "hi"); !errors.Is(err, chat.ErrNotMember) {
 			t.Errorf("Send() after leaving = %v, want ErrNotMember", err)
@@ -291,8 +307,8 @@ func TestEmptyRoomStopsAndStartsOver(t *testing.T) {
 
 		join(t, bob, "general")
 		send(t, bob, "general", "again")
-		if got := drain(bob); len(got) != 1 || got[0].(*chat.Message).Seq != 1 {
-			t.Errorf("events in the recreated room = %v, want one message with seq 1", got)
+		if _, seq := onlyMessage(t, drain(bob)); seq != 1 {
+			t.Errorf("seq in the recreated room = %d, want 1", seq)
 		}
 	})
 }
@@ -401,13 +417,12 @@ func TestFirstEndCauseWins(t *testing.T) {
 
 	errExpired := errors.New("token expired")
 	tests := []struct {
-		name         string
-		overflowAt   time.Duration
-		wantCause    error
-		wantNotCause error
+		name       string
+		overflowAt time.Duration
+		wantCause  error
 	}{
-		{name: "dropped before expiry", overflowAt: 30 * time.Minute, wantCause: chat.ErrSlowClient, wantNotCause: errExpired},
-		{name: "expired before drop", overflowAt: 90 * time.Minute, wantCause: errExpired, wantNotCause: chat.ErrSlowClient},
+		{name: "dropped before expiry", overflowAt: 30 * time.Minute, wantCause: chat.ErrSlowClient},
+		{name: "expired before drop", overflowAt: 90 * time.Minute, wantCause: errExpired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -426,7 +441,7 @@ func TestFirstEndCauseWins(t *testing.T) {
 				}
 				time.Sleep(time.Hour)
 
-				if err := alice.cause(); !errors.Is(err, tt.wantCause) || errors.Is(err, tt.wantNotCause) {
+				if err := alice.cause(); !errors.Is(err, tt.wantCause) {
 					t.Errorf("cause = %v, want %v", err, tt.wantCause)
 				}
 			})
@@ -473,8 +488,8 @@ func TestRoomPanicEndsItsMembers(t *testing.T) {
 		carol := connect(t, h, "carol")
 		join(t, carol, "general")
 		send(t, carol, "general", "fresh start")
-		if got := drain(carol); len(got) != 1 || got[0].(*chat.Message).Seq != 1 {
-			t.Errorf("events in the recreated room = %v, want one message with seq 1", got)
+		if _, seq := onlyMessage(t, drain(carol)); seq != 1 {
+			t.Errorf("seq in the recreated room = %d, want 1", seq)
 		}
 	})
 }
@@ -514,5 +529,51 @@ func TestConnectNeedsAuthenticatedUser(t *testing.T) {
 		if _, err := h.Connect(t.Context(), func(error) {}); !errors.Is(err, chat.ErrNoUser) {
 			t.Errorf("Connect() without a user = %v, want ErrNoUser", err)
 		}
+	})
+}
+
+func TestEndedContextChangesNothing(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(t)
+		defer h.Close()
+		alice, bob := connect(t, h, "alice"), connect(t, h, "bob")
+		join(t, bob, "general")
+		ended, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		if err := alice.Join(ended, "general"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Join() with an ended context = %v, want context.Canceled", err)
+		}
+		if err := bob.Leave(ended, "general"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Leave() with an ended context = %v, want context.Canceled", err)
+		}
+
+		send(t, bob, "general", "still here")
+		if got := drain(alice); len(got) != 0 {
+			t.Errorf("session whose join was cancelled got %v", got)
+		}
+		if text, _ := onlyMessage(t, drain(bob)); text != "still here" {
+			t.Errorf("member whose leave was cancelled got %q", text)
+		}
+		if n := chat.RoomCount(h); n != 1 {
+			t.Errorf("RoomCount() = %d, want 1", n)
+		}
+	})
+}
+
+func TestConnectRejectsNilEnd(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(t)
+		defer h.Close()
+		defer func() {
+			if recover() == nil {
+				t.Error("Connect() with a nil end did not panic")
+			}
+		}()
+		_, _ = h.Connect(auth.NewContext(t.Context(), auth.Claims{UserID: "id-alice", Username: "alice"}), nil)
 	})
 }

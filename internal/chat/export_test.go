@@ -6,7 +6,7 @@ import "context"
 func RoomCount(h *Hub) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.byID)
+	return len(h.rooms)
 }
 
 // Crash makes the goroutine of a room s is in panic, as a bug in it would.

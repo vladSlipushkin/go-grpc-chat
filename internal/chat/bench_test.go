@@ -1,7 +1,6 @@
 package chat_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -32,7 +31,7 @@ func BenchmarkSend(b *testing.B) {
 
 			sent := 0
 			for b.Loop() {
-				if _, err := sessions[0].Send(context.Background(), "general", "hello"); err != nil {
+				if _, err := sessions[0].Send(b.Context(), "general", "hello"); err != nil {
 					b.Fatal(err)
 				}
 				// Empty the queues before they fill up, off the clock.

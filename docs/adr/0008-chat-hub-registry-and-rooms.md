@@ -25,10 +25,11 @@ leave and message, and its changes must happen in one order. Package
 
 ### Registry: a map under a mutex
 
-`Hub` keeps `map[string]*room` under a `sync.Mutex`. Everything done under
-the lock is a map lookup, an insert or a counter change: no I/O, no channel
-operations, nothing that waits. A plain mutex is the simplest correct tool
-for that, and contention is limited to joins and leaves, never messages.
+`Hub` keeps `map[string]*room` under a `sync.Mutex`. Nothing done under the
+lock blocks: map operations, counter changes, closing a room's stop channel
+and starting a room's goroutine; no I/O, no channel sends or receives. A
+plain mutex is the simplest correct tool for that, and contention is
+limited to joins and leaves, never messages.
 
 The hub alone decides when a room stops. Every session that is in a room, or
 is about to join it, holds it: `acquire` (look up or start the room, count a
@@ -48,8 +49,9 @@ room's state, the order in which it runs commands is the room's order:
 `seq` needs no atomics and every member's queue receives messages in the
 same order.
 
-- A caller gives up on its context only while waiting for the room to
-  accept a command. Once accepted, it waits for the command to finish
+- A caller gives up on its context only before the room accepts a
+  command; a context that has already ended is checked first, so it always
+  wins. Once accepted, it waits for the command to finish
   regardless of the context: commands never block, so the wait is short,
   and abandoning it would leave the caller unsure whether its join was
   applied.
@@ -95,10 +97,12 @@ read by the stream's writer.
 ### Failure of a room
 
 A panic in a room's goroutine is recovered there. The room logs it with the
-stack, ends every member's session with `ErrRoomFailed`, which the stream
-handler reports as `INTERNAL`, and is removed from the registry. Calls
-waiting on it return `ErrRoomFailed`. Other rooms are unaffected, and the
-next join of the same id starts a fresh room. Letting the panic crash the
+stack, removes itself from the registry and ends every member's session
+with `ErrRoomFailed`, which the stream handler reports as `INTERNAL`. Calls
+waiting on it return `ErrRoomFailed`, unless their command had already run.
+Other rooms are unaffected, and the next join of the same id starts a fresh
+room; a join that found the room a moment before it failed gets
+`ErrRoomFailed` too. Letting the panic crash the
 process would drop every connection for a bug in one room.
 
 ### Shutdown order

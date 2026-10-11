@@ -95,11 +95,21 @@ func streamAuth(verifier TokenVerifier, public publicServices) grpc.StreamServer
 		err = handler(srv, &serverStream{ServerStream: ss, ctx: ctx})
 		// A parent cancellation or a shorter client deadline keeps its own
 		// cause, so only a real expiry is reported as one.
-		if errors.Is(context.Cause(ctx), errTokenExpired) {
+		if errors.Is(context.Cause(ctx), errTokenExpired) && endedByDeadline(err) {
 			return errExpiredToken
 		}
 		return err
 	}
+}
+
+// endedByDeadline reports whether a stream handler's result says no more
+// than that its context ended: nil, the context's error, or its status
+// equivalent. Any other error, such as INTERNAL, is the handler's own
+// outcome and reaches the client unchanged even if the token expired too.
+func endedByDeadline(err error) bool {
+	return err == nil ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		status.Code(err) == codes.DeadlineExceeded
 }
 
 func authenticate(ctx context.Context, verifier TokenVerifier) (auth.Claims, error) {

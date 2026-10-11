@@ -30,8 +30,13 @@ when it expires. Passwords are normalized before hashing (ADR-0005).
   so it costs as much as the hashes of users registered under that cost.
 - `Register` and `Login` check the context before hashing and return its
   error if the caller has already gone away; bcrypt itself cannot be
-  interrupted. Such calls end with `CANCELLED` or `DEADLINE_EXCEEDED` and
-  are not logged as failures.
+  interrupted. `Register` checks again before storing the user, so a
+  deadline that passes during hashing does not create an account the
+  caller never hears about (one passing during the insert still can). Such
+  calls end with `CANCELLED` or `DEADLINE_EXCEEDED`, built from the call's
+  context rather than the error, and are not logged as failures. A context
+  error while the call is still live comes from a timeout inside the server
+  and is reported as `INTERNAL`.
 - A password longer than 72 bytes after normalization never matches on
   login, even if its first 72 bytes are a registered password: no stored
   hash was made from it, and truncating would accept a different password.
@@ -45,8 +50,9 @@ succeeds. It copies password hashes in and out, so no caller shares a
 slice with the store. PostgreSQL will implement the same interface with a
 unique constraint, mapping a unique violation to `ErrUsernameTaken` and a
 missing row to `ErrUserNotFound`; any other error is internal and never
-takes the dummy-hash path. User ids are UUIDv7: created without coordination, opaque to
-clients, and time-ordered, so they index well in a B-tree once stored.
+takes the dummy-hash path. User ids are UUIDv7: created without
+coordination, opaque to clients, and time-ordered, so they index well in a
+B-tree once stored.
 
 Accounts kept in memory are lost on restart until storage exists.
 
@@ -95,8 +101,8 @@ logging, recovery, auth. The first interceptor is the outermost.
   claims and ends at the token's expiry:
   `context.WithDeadlineCause(ctx, exp, errTokenExpired)`. When the cause is
   `errTokenExpired` and the handler returned nothing more specific than
-  that its context ended (nil, `context.DeadlineExceeded` or its
-  `DEADLINE_EXCEEDED` status), the stream ends with `UNAUTHENTICATED` and
+  that its context ended (nil, `context.DeadlineExceeded`, the cause itself
+  or a `DEADLINE_EXCEEDED` status), the stream ends with `UNAUTHENTICATED` and
   reason `TOKEN_EXPIRED`. Any other handler error, such as `INTERNAL`, is
   returned as is, because it describes what actually went wrong. A client
   cancelling or its own shorter deadline keep their own status.

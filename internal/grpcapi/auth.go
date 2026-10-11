@@ -52,6 +52,8 @@ func (s *AuthServer) Register(ctx context.Context, req *authv1.RegisterRequest) 
 		return nil, errUsernameTaken
 	case errors.Is(err, auth.ErrPasswordTooLong):
 		return nil, passwordTooLong()
+	case isContextError(err):
+		return nil, status.FromContextError(err).Err()
 	case err != nil:
 		return nil, s.internal(ctx, "register", err)
 	}
@@ -64,6 +66,8 @@ func (s *AuthServer) Login(ctx context.Context, req *authv1.LoginRequest) (*auth
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		return nil, errInvalidCredentials
+	case isContextError(err):
+		return nil, status.FromContextError(err).Err()
 	case err != nil:
 		return nil, s.internal(ctx, "login", err)
 	}
@@ -71,6 +75,13 @@ func (s *AuthServer) Login(ctx context.Context, req *authv1.LoginRequest) (*auth
 		AccessToken: token.Value,
 		ExpiresAt:   timestamppb.New(token.ExpiresAt),
 	}, nil
+}
+
+// isContextError reports whether err means the caller cancelled the call or
+// its deadline passed. Such calls end with CANCELLED or DEADLINE_EXCEEDED and
+// are not logged as failures.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // internal logs err, which may name the storage or other internals, and

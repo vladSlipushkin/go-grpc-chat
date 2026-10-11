@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,26 @@ func TestLoginFailuresAreIndistinguishable(t *testing.T) {
 				t.Errorf("Login(%q) = %v, want ErrInvalidCredentials", tt.username, err)
 			}
 		})
+	}
+}
+
+func TestDoneContextSkipsHashing(t *testing.T) {
+	t.Parallel()
+
+	svc := newService(t)
+	if _, err := svc.Register(t.Context(), "alice", "correct horse"); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, err := svc.Register(ctx, "bob", "correct horse"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Register() = %v, want context.Canceled", err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		if _, err := svc.Login(ctx, name, "correct horse"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Login(%q) = %v, want context.Canceled", name, err)
+		}
 	}
 }
 

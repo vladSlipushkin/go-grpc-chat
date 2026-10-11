@@ -77,7 +77,14 @@ func NewService(users UserStore, tokens *Tokens, opts Options) (*Service, error)
 // Register creates a user. Username format and password length are
 // validated by the API contract; Register only enforces the limit that
 // depends on normalization and returns ErrPasswordTooLong for it.
+//
+// Register and Login return ctx.Err() without hashing if ctx is already
+// done: bcrypt cannot be interrupted, and a caller that has gone away is not
+// worth a quarter of a second of CPU.
 func (s *Service) Register(ctx context.Context, username, password string) (User, error) {
+	if err := ctx.Err(); err != nil {
+		return User{}, err
+	}
 	hash, err := hashPassword(password, s.cost)
 	if err != nil {
 		return User{}, err
@@ -109,12 +116,15 @@ type Token struct {
 // same amount of bcrypt work.
 func (s *Service) Login(ctx context.Context, username, password string) (Token, error) {
 	u, err := s.users.UserByName(ctx, username)
-	switch {
-	case errors.Is(err, ErrUserNotFound):
+	if err != nil && !errors.Is(err, ErrUserNotFound) {
+		return Token{}, fmt.Errorf("find user: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return Token{}, err
+	}
+	if errors.Is(err, ErrUserNotFound) {
 		_ = comparePassword(s.dummyHash, password)
 		return Token{}, ErrInvalidCredentials
-	case err != nil:
-		return Token{}, fmt.Errorf("find user: %w", err)
 	}
 
 	switch err := comparePassword(u.PasswordHash, password); {

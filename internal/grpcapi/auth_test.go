@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -136,6 +137,50 @@ func TestAuthErrors(t *testing.T) {
 	br, ok := st.Details()[0].(*errdetails.BadRequest)
 	if !ok || len(br.GetFieldViolations()) != 1 || br.GetFieldViolations()[0].GetField() != "password" {
 		t.Errorf("Register() details = %v, want a BadRequest on password", st.Details())
+	}
+}
+
+// fakeAccounts fails every call with err.
+type fakeAccounts struct{ err error }
+
+func (a fakeAccounts) Register(context.Context, string, string) (auth.User, error) {
+	return auth.User{}, a.err
+}
+
+func (a fakeAccounts) Login(context.Context, string, string) (auth.Token, error) {
+	return auth.Token{}, a.err
+}
+
+func TestContextErrorsAreNotInternal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want codes.Code
+	}{
+		{name: "cancelled", err: context.Canceled, want: codes.Canceled},
+		{name: "deadline", err: fmt.Errorf("find user: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs bytes.Buffer
+			srv := grpcapi.NewAuthServer(fakeAccounts{err: tt.err}, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+			_, err := srv.Register(t.Context(), &authv1.RegisterRequest{Username: username, Password: password})
+			if code := status.Code(err); code != tt.want {
+				t.Errorf("Register() code = %v, want %v", code, tt.want)
+			}
+			_, err = srv.Login(t.Context(), &authv1.LoginRequest{Username: username, Password: password})
+			if code := status.Code(err); code != tt.want {
+				t.Errorf("Login() code = %v, want %v", code, tt.want)
+			}
+			if logs.Len() != 0 {
+				t.Errorf("logged %q, want nothing for a cancelled call", logs.String())
+			}
+		})
 	}
 }
 

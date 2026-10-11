@@ -87,6 +87,7 @@ proto-breaking:
 .PHONY: tidy-check
 tidy-check:
 	go mod tidy -diff
+	go -C tools mod tidy -diff
 
 .PHONY: check
 check: lint proto-lint tidy-check test-race vuln

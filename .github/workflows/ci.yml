@@ -24,7 +24,9 @@ jobs:
         with:
           version: v2.14.0
       - name: Modules are tidy
-        run: go mod tidy -diff
+        run: |
+          go mod tidy -diff
+          go -C tools mod tidy -diff
 
   test:
     runs-on: ubuntu-latest

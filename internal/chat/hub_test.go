@@ -1,11 +1,13 @@
 package chat_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -431,4 +433,87 @@ func TestFirstEndCauseWins(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestRoomPanicEndsItsMembers(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var logs bytes.Buffer
+		h := chat.NewHub(slog.New(slog.NewJSONHandler(&logs, nil)))
+		defer h.Close()
+		alice, bob := connect(t, h, "alice"), connect(t, h, "bob")
+		join(t, alice, "general")
+		join(t, bob, "general")
+		join(t, alice, "other")
+
+		if err := chat.Crash(t.Context(), alice.Session, "general"); !errors.Is(err, chat.ErrRoomFailed) {
+			t.Fatalf("call into the crashing room = %v, want ErrRoomFailed", err)
+		}
+
+		for _, c := range []client{alice, bob} {
+			if err := c.cause(); !errors.Is(err, chat.ErrRoomFailed) {
+				t.Errorf("member cause = %v, want ErrRoomFailed", err)
+			}
+		}
+		if !strings.Contains(logs.String(), `"msg":"room failed"`) || !strings.Contains(logs.String(), `"room_id":"general"`) {
+			t.Errorf("log = %s, want a room failed record for general", logs.String())
+		}
+		if n := chat.RoomCount(h); n != 1 {
+			t.Errorf("RoomCount() after the crash = %d, want 1 (other)", n)
+		}
+
+		// The members' handlers close their sessions; the room is already
+		// gone, so leaving it must not fail or hang.
+		alice.Close()
+		bob.Close()
+		if n := chat.RoomCount(h); n != 0 {
+			t.Errorf("RoomCount() after members closed = %d, want 0", n)
+		}
+
+		carol := connect(t, h, "carol")
+		join(t, carol, "general")
+		send(t, carol, "general", "fresh start")
+		if got := drain(carol); len(got) != 1 || got[0].(*chat.Message).Seq != 1 {
+			t.Errorf("events in the recreated room = %v, want one message with seq 1", got)
+		}
+	})
+}
+
+func TestHubCloseEndsRemainingSessions(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(t)
+		alice, idle := connect(t, h, "alice"), connect(t, h, "idle")
+		join(t, alice, "general")
+
+		h.Close()
+
+		if err := alice.cause(); !errors.Is(err, chat.ErrHubClosed) {
+			t.Errorf("member cause = %v, want ErrHubClosed", err)
+		}
+		if _, err := alice.Send(t.Context(), "general", "hi"); !errors.Is(err, chat.ErrHubClosed) {
+			t.Errorf("Send() after hub Close = %v, want ErrHubClosed", err)
+		}
+		if err := idle.Join(t.Context(), "general"); !errors.Is(err, chat.ErrHubClosed) {
+			t.Errorf("Join() after hub Close = %v, want ErrHubClosed", err)
+		}
+		alice.Close()
+		if _, err := h.Connect(auth.NewContext(t.Context(), auth.Claims{UserID: "id-late", Username: "late"}), func(error) {}); !errors.Is(err, chat.ErrHubClosed) {
+			t.Errorf("Connect() after hub Close = %v, want ErrHubClosed", err)
+		}
+	})
+}
+
+func TestConnectNeedsAuthenticatedUser(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(t)
+		defer h.Close()
+		if _, err := h.Connect(t.Context(), func(error) {}); !errors.Is(err, chat.ErrNoUser) {
+			t.Errorf("Connect() without a user = %v, want ErrNoUser", err)
+		}
+	})
 }

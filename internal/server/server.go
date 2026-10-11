@@ -43,10 +43,10 @@ type Options struct {
 	// ShutdownTimeout bounds graceful shutdown; RPCs still running after it
 	// are cancelled. Zero cancels running RPCs as soon as shutdown starts.
 	ShutdownTimeout time.Duration
-	// PublicServices are full service names callable without an access
-	// token, such as "auth.v1.AuthService". Health checking and reflection
-	// are always public.
-	PublicServices []string
+	// PublicMethods are full method names callable without an access
+	// token, such as "/auth.v1.AuthService/Login". Health checking and
+	// reflection are always public.
+	PublicMethods []string
 }
 
 // Server is a gRPC server with health checking, logging, panic recovery,
@@ -65,12 +65,14 @@ var _ grpc.ServiceRegistrar = (*Server)(nil)
 // New creates a Server that checks access tokens with verifier. Services are
 // registered with RegisterService before Serve is called.
 func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
-	public := publicServices{
-		healthpb.Health_ServiceDesc.ServiceName:                      true,
-		reflectionpb.ServerReflection_ServiceDesc.ServiceName:        true,
-		reflectionv1alphapb.ServerReflection_ServiceDesc.ServiceName: true,
+	public := publicMethods{
+		healthpb.Health_Check_FullMethodName:                                     true,
+		healthpb.Health_List_FullMethodName:                                      true,
+		healthpb.Health_Watch_FullMethodName:                                     true,
+		reflectionpb.ServerReflection_ServerReflectionInfo_FullMethodName:        true,
+		reflectionv1alphapb.ServerReflection_ServerReflectionInfo_FullMethodName: true,
 	}
-	for _, name := range opts.PublicServices {
+	for _, name := range opts.PublicMethods {
 		public[name] = true
 	}
 

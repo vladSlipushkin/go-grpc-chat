@@ -62,7 +62,10 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer) err
 	srv := server.New(logger, tokens, server.Options{ //nolint:contextcheck // false positive, see above
 		Reflection:      cfg.Reflection,
 		ShutdownTimeout: cfg.ShutdownTimeout,
-		PublicServices:  []string{authv1.AuthService_ServiceDesc.ServiceName},
+		PublicMethods: []string{
+			authv1.AuthService_Register_FullMethodName,
+			authv1.AuthService_Login_FullMethodName,
+		},
 	})
 	// Every service is registered here, before Serve (ADR-0006).
 	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(accounts, logger))

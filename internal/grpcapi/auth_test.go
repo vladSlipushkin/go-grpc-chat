@@ -277,7 +277,10 @@ func startServer(t *testing.T) testEnv {
 	}
 	srv := server.New(logger, tokens, server.Options{
 		ShutdownTimeout: time.Second,
-		PublicServices:  []string{authv1.AuthService_ServiceDesc.ServiceName},
+		PublicMethods: []string{
+			authv1.AuthService_Register_FullMethodName,
+			authv1.AuthService_Login_FullMethodName,
+		},
 	})
 	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(accounts, logger))
 	private := &privateService{}

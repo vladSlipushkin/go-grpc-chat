@@ -48,7 +48,7 @@ func TestUnaryAuth(t *testing.T) {
 
 	claims := auth.Claims{UserID: "user-1", Username: "alice", ExpiresAt: time.Now().Add(time.Hour)}
 	verifier := fakeVerifier{token: "good", claims: claims}
-	public := publicServices{"auth.v1.AuthService": true}
+	public := publicMethods{"/auth.v1.AuthService/Login": true}
 
 	tests := []struct {
 		name     string
@@ -66,6 +66,7 @@ func TestUnaryAuth(t *testing.T) {
 		{name: "two tokens", method: "/test.v1.Private/Do", auth: []string{"Bearer good", "Bearer good"}, wantCode: codes.Unauthenticated},
 		{name: "unknown token", method: "/test.v1.Private/Do", auth: []string{"Bearer forged"}, wantCode: codes.Unauthenticated},
 		{name: "service name prefix is not public", method: "/auth.v1.AuthServiceX/Login", wantCode: codes.Unauthenticated},
+		{name: "unlisted method of a public service", method: "/auth.v1.AuthService/ChangePassword", wantCode: codes.Unauthenticated},
 	}
 
 	for _, tt := range tests {

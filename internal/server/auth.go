@@ -48,17 +48,19 @@ func mustErrorInfo(code codes.Code, msg, reason string) error {
 	return st.Err()
 }
 
-// publicServices lists services callable without an access token.
-type publicServices map[string]bool
+// publicMethods lists full method names, such as
+// "/auth.v1.AuthService/Login", callable without an access token. Listing
+// methods rather than services keeps a method added to a public service
+// protected until it is listed too.
+type publicMethods map[string]bool
 
-func (p publicServices) allows(fullMethod string) bool {
-	service, _, _ := strings.Cut(strings.TrimPrefix(fullMethod, "/"), "/")
-	return p[service]
+func (p publicMethods) allows(fullMethod string) bool {
+	return p[fullMethod]
 }
 
 // unaryAuth rejects calls to non-public methods that lack a valid access
 // token and passes the token's claims to the handler in the context.
-func unaryAuth(verifier TokenVerifier, public publicServices) grpc.UnaryServerInterceptor {
+func unaryAuth(verifier TokenVerifier, public publicMethods) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if public.allows(info.FullMethod) {
 			return handler(ctx, req)
@@ -80,7 +82,7 @@ func unaryAuth(verifier TokenVerifier, public publicServices) grpc.UnaryServerIn
 // watch ss.Context().Done() and return when it fires, without first waiting
 // for a goroutine blocked in RecvMsg; that goroutine is released once the
 // handler has returned and the stream is closed.
-func streamAuth(verifier TokenVerifier, public publicServices) grpc.StreamServerInterceptor {
+func streamAuth(verifier TokenVerifier, public publicMethods) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		if public.allows(info.FullMethod) {
 			return handler(srv, ss)

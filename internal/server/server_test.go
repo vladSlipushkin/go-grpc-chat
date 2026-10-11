@@ -88,7 +88,7 @@ func TestPanicInRegisteredServiceIsRecoveredAndLogged(t *testing.T) {
 	var logs lockedBuffer
 	srv := server.New(slog.New(slog.NewJSONHandler(&logs, nil)), rejectTokens{}, server.Options{
 		ShutdownTimeout: time.Second,
-		PublicServices:  []string{panicServiceDesc.ServiceName},
+		PublicMethods:   []string{"/test.v1.Panic/Boom"},
 	})
 	srv.RegisterService(&panicServiceDesc, struct{}{})
 	ts := startServer(t, srv)

@@ -99,3 +99,37 @@ func TestPasswordAtLimitAfterNormalizationIsAccepted(t *testing.T) {
 		t.Errorf("hashPassword() of %d ASCII bytes = %v, want nil", maxPasswordBytes, err)
 	}
 }
+
+// The dummy hash compared against for an unknown username must cost as much
+// as the hashes of registered users, or the login time tells whether a
+// username exists.
+func TestDummyHashUsesConfiguredCost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cost int
+		want int
+	}{
+		{name: "default", cost: 0, want: DefaultBcryptCost},
+		{name: "minimum", cost: bcrypt.MinCost, want: bcrypt.MinCost},
+		{name: "above minimum", cost: bcrypt.MinCost + 1, want: bcrypt.MinCost + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, err := NewService(nil, nil, Options{BcryptCost: tt.cost})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+			got, err := bcrypt.Cost(svc.dummyHash)
+			if err != nil {
+				t.Fatalf("bcrypt.Cost() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("dummy hash cost = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

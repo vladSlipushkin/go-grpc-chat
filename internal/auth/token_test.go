@@ -87,11 +87,21 @@ func TestTokenRejectsForgeries(t *testing.T) {
 		},
 	}
 
+	expired := claims
+	expired.IssuedAt = jwt.NewNumericDate(time.Now().Add(-2 * time.Hour))
+	expired.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Hour))
+
+	// A forgery is reported as invalid even when it is also expired:
+	// TOKEN_EXPIRED would tell the client to log in again, as if the token
+	// had once been genuine.
 	tests := []struct {
 		name  string
 		token string
 	}{
 		{name: "empty", token: ""},
+		{name: "expired, another secret", token: sign(t, jwt.SigningMethodHS256, expired, []byte("another-secret-of-at-least-32-bytes"))},
+		{name: "expired, alg none", token: sign(t, jwt.SigningMethodNone, expired, jwt.UnsafeAllowNoneSignatureType)},
+		{name: "expired, tampered payload", token: withPayload(t, valid, `{"sub":"user-2","username":"mallory","exp":946684800}`)},
 		{name: "garbage", token: "not.a.token"},
 		{name: "tampered payload", token: withPayload(t, valid, `{"sub":"user-2","username":"mallory","exp":4102444800}`)},
 		{name: "another secret", token: sign(t, jwt.SigningMethodHS256, claims, []byte("another-secret-of-at-least-32-bytes"))},

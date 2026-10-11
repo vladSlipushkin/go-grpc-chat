@@ -53,7 +53,10 @@ values are too complex for `==`.
   - nothing is synchronized with `time.Sleep`; tests wait on channels,
     stream events or a polled condition;
   - waits for something that must happen are capped generously (5 seconds)
-    and only fail a test that hangs;
+    and only fail a test that hangs. A wait that covers heavy work of its
+    own gets a cap well above that work instead: server startup hashes a
+    bcrypt dummy at the production cost, seconds of CPU under the race
+    detector, so the test waiting for it allows 30 seconds;
   - a short server timeout (200 ms) is allowed only to cut a wait short when
     what it races against is in-process work taking microseconds, a margin
     of several orders of magnitude even under the race detector.

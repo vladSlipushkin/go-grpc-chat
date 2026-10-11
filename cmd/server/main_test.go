@@ -30,8 +30,11 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	go func() { errc <- run(ctx, lookup, &out) }()
 
 	// Cancel once the listener is bound, so the test covers a start that got
-	// past configuration and listening before it stops.
-	waitFor(t, func() bool { return strings.Contains(out.String(), "server started") })
+	// past configuration and listening before it stops. Startup hashes the
+	// login dummy at the production bcrypt cost, which alone takes seconds
+	// under the race detector on a shared CI runner, so the cap is well above
+	// that and only catches a start that hangs.
+	waitFor(t, 30*time.Second, func() bool { return strings.Contains(out.String(), "server started") })
 	cancel()
 
 	select {
@@ -84,12 +87,12 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-func waitFor(t *testing.T, cond func() bool) {
+func waitFor(t *testing.T, limit time.Duration, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(limit)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 5s")
+			t.Fatalf("condition not met within %v", limit)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

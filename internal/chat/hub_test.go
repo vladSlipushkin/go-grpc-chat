@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -35,10 +34,10 @@ type client struct {
 // connect opens a session for a user named name whose id is "id-" + name.
 func connect(t *testing.T, h *chat.Hub, name string) client {
 	t.Helper()
-	return connectWith(t, h, t.Context(), name)
+	return connectWith(t.Context(), t, h, name)
 }
 
-func connectWith(t *testing.T, h *chat.Hub, parent context.Context, name string) client {
+func connectWith(parent context.Context, t *testing.T, h *chat.Hub, name string) client {
 	t.Helper()
 	ctx, cancel := context.WithCancelCause(auth.NewContext(parent, auth.Claims{UserID: "id-" + name, Username: name}))
 	t.Cleanup(func() { cancel(nil) })
@@ -51,7 +50,7 @@ func connectWith(t *testing.T, h *chat.Hub, parent context.Context, name string)
 
 func newHub(t *testing.T) *chat.Hub {
 	t.Helper()
-	return chat.NewHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return chat.NewHub(slog.New(slog.DiscardHandler))
 }
 
 func join(t *testing.T, c client, room string) {
@@ -419,7 +418,7 @@ func TestFirstEndCauseWins(t *testing.T) {
 				defer h.Close()
 				parent, cancel := context.WithDeadlineCause(t.Context(), time.Now().Add(time.Hour), errExpired)
 				defer cancel()
-				alice := connectWith(t, h, parent, "alice")
+				alice := connectWith(parent, t, h, "alice")
 
 				time.Sleep(tt.overflowAt)
 				for range chat.QueueLen + 1 {

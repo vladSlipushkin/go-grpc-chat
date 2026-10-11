@@ -172,6 +172,7 @@ func TestStreamAuthKeepsHandlerErrorsAtExpiry(t *testing.T) {
 	}{
 		{name: "nil", result: func(context.Context) error { return nil }, wantErr: errExpiredToken},
 		{name: "context error", result: func(ctx context.Context) error { return ctx.Err() }, wantErr: errExpiredToken},
+		{name: "context cause", result: context.Cause, wantErr: errExpiredToken},
 		{
 			name:    "context error as status",
 			result:  func(ctx context.Context) error { return status.FromContextError(ctx.Err()).Err() },

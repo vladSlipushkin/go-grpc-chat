@@ -57,8 +57,8 @@ func logPanic(ctx context.Context, logger *slog.Logger, method string, r any) {
 
 // callInfo collects what inner interceptors learn about a call, so the
 // record logging writes when the call ends can include it. Only
-// interceptors write to it, on the call's goroutine and before the handler
-// is called, so no locking is needed. Handlers and the goroutines they start
+// interceptors write to it, on the call's goroutine and before the service
+// handler is called, so no locking is needed. Handlers and the goroutines they start
 // must not write to it.
 type callInfo struct {
 	userID string

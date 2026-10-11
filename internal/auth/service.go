@@ -89,6 +89,11 @@ func (s *Service) Register(ctx context.Context, username, password string) (User
 	if err != nil {
 		return User{}, err
 	}
+	// Hashing takes long enough for a short client deadline to pass; do not
+	// create an account the caller will never hear about.
+	if err := ctx.Err(); err != nil {
+		return User{}, err
+	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return User{}, fmt.Errorf("generate user id: %w", err)
@@ -116,13 +121,14 @@ type Token struct {
 // same amount of bcrypt work.
 func (s *Service) Login(ctx context.Context, username, password string) (Token, error) {
 	u, err := s.users.UserByName(ctx, username)
-	if err != nil && !errors.Is(err, ErrUserNotFound) {
+	notFound := errors.Is(err, ErrUserNotFound)
+	if err != nil && !notFound {
 		return Token{}, fmt.Errorf("find user: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return Token{}, err
 	}
-	if errors.Is(err, ErrUserNotFound) {
+	if notFound {
 		_ = comparePassword(s.dummyHash, password)
 		return Token{}, ErrInvalidCredentials
 	}

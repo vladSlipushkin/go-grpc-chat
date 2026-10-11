@@ -151,16 +151,42 @@ func (a fakeAccounts) Login(context.Context, string, string) (auth.Token, error)
 	return auth.Token{}, a.err
 }
 
-func TestContextErrorsAreNotInternal(t *testing.T) {
+func TestContextErrors(t *testing.T) {
 	t.Parallel()
 
+	cancelled := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		return ctx
+	}
+	expired := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	live := func(t *testing.T) context.Context {
+		t.Helper()
+		return t.Context()
+	}
+
 	tests := []struct {
-		name string
-		err  error
-		want codes.Code
+		name    string
+		ctx     func(t *testing.T) context.Context
+		err     error
+		want    codes.Code
+		wantLog bool
 	}{
-		{name: "cancelled", err: context.Canceled, want: codes.Canceled},
-		{name: "deadline", err: fmt.Errorf("find user: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+		{name: "caller cancelled", ctx: cancelled, err: context.Canceled, want: codes.Canceled},
+		{name: "caller deadline", ctx: expired, err: fmt.Errorf("find user: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+		{
+			name:    "server timeout on a live call",
+			ctx:     live,
+			err:     fmt.Errorf("find user: query users: %w", context.DeadlineExceeded),
+			want:    codes.Internal,
+			wantLog: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,17 +194,18 @@ func TestContextErrorsAreNotInternal(t *testing.T) {
 
 			var logs bytes.Buffer
 			srv := grpcapi.NewAuthServer(fakeAccounts{err: tt.err}, slog.New(slog.NewJSONHandler(&logs, nil)))
+			ctx := tt.ctx(t)
 
-			_, err := srv.Register(t.Context(), &authv1.RegisterRequest{Username: username, Password: password})
+			_, err := srv.Register(ctx, &authv1.RegisterRequest{Username: username, Password: password})
 			if code := status.Code(err); code != tt.want {
 				t.Errorf("Register() code = %v, want %v", code, tt.want)
 			}
-			_, err = srv.Login(t.Context(), &authv1.LoginRequest{Username: username, Password: password})
-			if code := status.Code(err); code != tt.want {
-				t.Errorf("Login() code = %v, want %v", code, tt.want)
+			_, err = srv.Login(ctx, &authv1.LoginRequest{Username: username, Password: password})
+			if st := status.Convert(err); st.Code() != tt.want || strings.Contains(st.Message(), "find user") {
+				t.Errorf("Login() = %v, want code %v without internal error text", err, tt.want)
 			}
-			if logs.Len() != 0 {
-				t.Errorf("logged %q, want nothing for a cancelled call", logs.String())
+			if logged := logs.Len() != 0; logged != tt.wantLog {
+				t.Errorf("logged %q, want a record: %v", logs.String(), tt.wantLog)
 			}
 		})
 	}

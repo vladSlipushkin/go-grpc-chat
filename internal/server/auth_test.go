@@ -48,7 +48,7 @@ func TestUnaryAuth(t *testing.T) {
 
 	claims := auth.Claims{UserID: "user-1", Username: "alice", ExpiresAt: time.Now().Add(time.Hour)}
 	verifier := fakeVerifier{token: "good", claims: claims}
-	public := publicServices{"auth.v1.AuthService": true}
+	public := publicMethods{"/auth.v1.AuthService/Login": true}
 
 	tests := []struct {
 		name     string
@@ -66,6 +66,7 @@ func TestUnaryAuth(t *testing.T) {
 		{name: "two tokens", method: "/test.v1.Private/Do", auth: []string{"Bearer good", "Bearer good"}, wantCode: codes.Unauthenticated},
 		{name: "unknown token", method: "/test.v1.Private/Do", auth: []string{"Bearer forged"}, wantCode: codes.Unauthenticated},
 		{name: "service name prefix is not public", method: "/auth.v1.AuthServiceX/Login", wantCode: codes.Unauthenticated},
+		{name: "unlisted method of a public service", method: "/auth.v1.AuthService/ChangePassword", wantCode: codes.Unauthenticated},
 	}
 
 	for _, tt := range tests {
@@ -158,6 +159,48 @@ func TestStreamAuthKeepsOtherCancellations(t *testing.T) {
 			t.Errorf("streamAuth() = %v, want the handler's context.DeadlineExceeded", err)
 		}
 	})
+}
+
+func TestStreamAuthKeepsHandlerErrorsAtExpiry(t *testing.T) {
+	t.Parallel()
+
+	internal := status.Error(codes.Internal, "room failed")
+	tests := []struct {
+		name    string
+		result  func(ctx context.Context) error
+		wantErr error
+	}{
+		{name: "nil", result: func(context.Context) error { return nil }, wantErr: errExpiredToken},
+		{name: "context error", result: func(ctx context.Context) error { return ctx.Err() }, wantErr: errExpiredToken},
+		{name: "context cause", result: context.Cause, wantErr: errExpiredToken},
+		{
+			name:    "context error as status",
+			result:  func(ctx context.Context) error { return status.FromContextError(ctx.Err()).Err() },
+			wantErr: errExpiredToken,
+		},
+		{name: "handler's own error", result: func(context.Context) error { return internal }, wantErr: internal},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				verifier := fakeVerifier{token: "good", claims: auth.Claims{UserID: "user-1", ExpiresAt: time.Now().Add(time.Hour)}}
+				ss := fakeStream{ctx: withAuthorization(t.Context(), "Bearer good")}
+				info := &grpc.StreamServerInfo{FullMethod: "/chat.v1.ChatService/Connect"}
+
+				err := streamAuth(verifier, nil)(nil, ss, info, func(_ any, ss grpc.ServerStream) error {
+					<-ss.Context().Done()
+					return tt.result(ss.Context())
+				})
+
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("streamAuth() = %v, want %v", err, tt.wantErr)
+				}
+			})
+		})
+	}
 }
 
 func TestStreamAuthRejectsMissingToken(t *testing.T) {

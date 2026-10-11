@@ -3,7 +3,7 @@
 #
 # Requires: Go 1.27, Docker, golangci-lint v2.14.0 (same version as CI).
 
-GO_IMAGE ?= golang:1.27
+GO_IMAGE ?= golang:1.27.2
 BIN_DIR  ?= bin
 
 # Development tools are pinned in a separate module so their dependencies
@@ -33,7 +33,8 @@ Usage: make TARGET
   gen             generate Go code from protobuf contracts
   proto-lint      lint and format-check protobuf contracts
   proto-breaking  check contracts for breaking changes against local main
-  check           lint, proto-lint, race tests and vulnerability scan
+  tidy-check      fail if go.mod or go.sum are not tidy
+  check           lint, proto-lint, tidy-check, race tests and vulnerability scan
   build           build binaries into $(BIN_DIR)/
   run             run the server locally with reflection and a dev JWT secret
   up              start local infrastructure and wait until healthy
@@ -83,8 +84,13 @@ proto-lint:
 proto-breaking:
 	$(TOOL) buf breaking --against ".git#branch=main"
 
+.PHONY: tidy-check
+tidy-check:
+	go mod tidy -diff
+	go -C tools mod tidy -diff
+
 .PHONY: check
-check: lint proto-lint test-race vuln
+check: lint proto-lint tidy-check test-race vuln
 
 .PHONY: build
 build:

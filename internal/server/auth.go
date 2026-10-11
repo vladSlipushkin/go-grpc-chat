@@ -48,17 +48,19 @@ func mustErrorInfo(code codes.Code, msg, reason string) error {
 	return st.Err()
 }
 
-// publicServices lists services callable without an access token.
-type publicServices map[string]bool
+// publicMethods lists full method names, such as
+// "/auth.v1.AuthService/Login", callable without an access token. Listing
+// methods rather than services keeps a method added to a public service
+// protected until it is listed too.
+type publicMethods map[string]bool
 
-func (p publicServices) allows(fullMethod string) bool {
-	service, _, _ := strings.Cut(strings.TrimPrefix(fullMethod, "/"), "/")
-	return p[service]
+func (p publicMethods) allows(fullMethod string) bool {
+	return p[fullMethod]
 }
 
 // unaryAuth rejects calls to non-public methods that lack a valid access
 // token and passes the token's claims to the handler in the context.
-func unaryAuth(verifier TokenVerifier, public publicServices) grpc.UnaryServerInterceptor {
+func unaryAuth(verifier TokenVerifier, public publicMethods) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if public.allows(info.FullMethod) {
 			return handler(ctx, req)
@@ -80,7 +82,7 @@ func unaryAuth(verifier TokenVerifier, public publicServices) grpc.UnaryServerIn
 // watch ss.Context().Done() and return when it fires, without first waiting
 // for a goroutine blocked in RecvMsg; that goroutine is released once the
 // handler has returned and the stream is closed.
-func streamAuth(verifier TokenVerifier, public publicServices) grpc.StreamServerInterceptor {
+func streamAuth(verifier TokenVerifier, public publicMethods) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		if public.allows(info.FullMethod) {
 			return handler(srv, ss)
@@ -95,11 +97,24 @@ func streamAuth(verifier TokenVerifier, public publicServices) grpc.StreamServer
 		err = handler(srv, &serverStream{ServerStream: ss, ctx: ctx})
 		// A parent cancellation or a shorter client deadline keeps its own
 		// cause, so only a real expiry is reported as one.
-		if errors.Is(context.Cause(ctx), errTokenExpired) {
+		if errors.Is(context.Cause(ctx), errTokenExpired) && onlyContextEnded(err) {
 			return errExpiredToken
 		}
 		return err
 	}
+}
+
+// onlyContextEnded reports whether a stream handler's result, once the token
+// has expired, says no more than that its context ended: the context's error,
+// its cause, or their status equivalent. nil counts too: a handler that
+// returns nil after the expiry cannot be told apart from one ended by it.
+// Any other error, such as INTERNAL, is the handler's own outcome and reaches
+// the client unchanged.
+func onlyContextEnded(err error) bool {
+	return err == nil ||
+		errors.Is(err, errTokenExpired) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		status.Code(err) == codes.DeadlineExceeded
 }
 
 func authenticate(ctx context.Context, verifier TokenVerifier) (auth.Claims, error) {

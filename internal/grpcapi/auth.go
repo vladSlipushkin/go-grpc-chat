@@ -52,6 +52,8 @@ func (s *AuthServer) Register(ctx context.Context, req *authv1.RegisterRequest) 
 		return nil, errUsernameTaken
 	case errors.Is(err, auth.ErrPasswordTooLong):
 		return nil, passwordTooLong()
+	case callEnded(ctx, err):
+		return nil, status.FromContextError(ctx.Err()).Err()
 	case err != nil:
 		return nil, s.internal(ctx, "register", err)
 	}
@@ -64,6 +66,8 @@ func (s *AuthServer) Login(ctx context.Context, req *authv1.LoginRequest) (*auth
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		return nil, errInvalidCredentials
+	case callEnded(ctx, err):
+		return nil, status.FromContextError(ctx.Err()).Err()
 	case err != nil:
 		return nil, s.internal(ctx, "login", err)
 	}
@@ -71,6 +75,16 @@ func (s *AuthServer) Login(ctx context.Context, req *authv1.LoginRequest) (*auth
 		AccessToken: token.Value,
 		ExpiresAt:   timestamppb.New(token.ExpiresAt),
 	}, nil
+}
+
+// callEnded reports whether err comes from the call's own context ending:
+// the caller cancelled or its deadline passed. Such calls end with CANCELLED
+// or DEADLINE_EXCEEDED built from ctx, not from err, so no internal error
+// text reaches the client, and are not logged as failures. A context error
+// while ctx is still live comes from a timeout inside the server, such as a
+// storage query, and is internal.
+func callEnded(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 // internal logs err, which may name the storage or other internals, and

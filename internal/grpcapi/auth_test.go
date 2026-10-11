@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -136,6 +137,77 @@ func TestAuthErrors(t *testing.T) {
 	br, ok := st.Details()[0].(*errdetails.BadRequest)
 	if !ok || len(br.GetFieldViolations()) != 1 || br.GetFieldViolations()[0].GetField() != "password" {
 		t.Errorf("Register() details = %v, want a BadRequest on password", st.Details())
+	}
+}
+
+// fakeAccounts fails every call with err.
+type fakeAccounts struct{ err error }
+
+func (a fakeAccounts) Register(context.Context, string, string) (auth.User, error) {
+	return auth.User{}, a.err
+}
+
+func (a fakeAccounts) Login(context.Context, string, string) (auth.Token, error) {
+	return auth.Token{}, a.err
+}
+
+func TestContextErrors(t *testing.T) {
+	t.Parallel()
+
+	cancelled := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		return ctx
+	}
+	expired := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	live := func(t *testing.T) context.Context {
+		t.Helper()
+		return t.Context()
+	}
+
+	tests := []struct {
+		name    string
+		ctx     func(t *testing.T) context.Context
+		err     error
+		want    codes.Code
+		wantLog bool
+	}{
+		{name: "caller cancelled", ctx: cancelled, err: context.Canceled, want: codes.Canceled},
+		{name: "caller deadline", ctx: expired, err: fmt.Errorf("find user: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+		{
+			name:    "server timeout on a live call",
+			ctx:     live,
+			err:     fmt.Errorf("find user: query users: %w", context.DeadlineExceeded),
+			want:    codes.Internal,
+			wantLog: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs bytes.Buffer
+			srv := grpcapi.NewAuthServer(fakeAccounts{err: tt.err}, slog.New(slog.NewJSONHandler(&logs, nil)))
+			ctx := tt.ctx(t)
+
+			_, err := srv.Register(ctx, &authv1.RegisterRequest{Username: username, Password: password})
+			if code := status.Code(err); code != tt.want {
+				t.Errorf("Register() code = %v, want %v", code, tt.want)
+			}
+			_, err = srv.Login(ctx, &authv1.LoginRequest{Username: username, Password: password})
+			if st := status.Convert(err); st.Code() != tt.want || strings.Contains(st.Message(), "find user") {
+				t.Errorf("Login() = %v, want code %v without internal error text", err, tt.want)
+			}
+			if logged := logs.Len() != 0; logged != tt.wantLog {
+				t.Errorf("logged %q, want a record: %v", logs.String(), tt.wantLog)
+			}
+		})
 	}
 }
 
@@ -277,7 +349,10 @@ func startServer(t *testing.T) testEnv {
 	}
 	srv := server.New(logger, tokens, server.Options{
 		ShutdownTimeout: time.Second,
-		PublicServices:  []string{authv1.AuthService_ServiceDesc.ServiceName},
+		PublicMethods: []string{
+			authv1.AuthService_Register_FullMethodName,
+			authv1.AuthService_Login_FullMethodName,
+		},
 	})
 	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(accounts, logger))
 	private := &privateService{}

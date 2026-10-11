@@ -4,12 +4,15 @@ package memory
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
 )
 
 // Users is an auth.UserStore backed by a map. It is safe for concurrent use.
+// Password hashes are copied in and out, so callers never share a slice with
+// the store, as they would not with a database.
 type Users struct {
 	mu     sync.RWMutex
 	byName map[string]auth.User
@@ -31,6 +34,7 @@ func (s *Users) Create(_ context.Context, u auth.User) error {
 	if _, ok := s.byName[u.Username]; ok {
 		return auth.ErrUsernameTaken
 	}
+	u.PasswordHash = slices.Clone(u.PasswordHash)
 	s.byName[u.Username] = u
 	return nil
 }
@@ -43,5 +47,6 @@ func (s *Users) UserByName(_ context.Context, username string) (auth.User, error
 	if !ok {
 		return auth.User{}, auth.ErrUserNotFound
 	}
+	u.PasswordHash = slices.Clone(u.PasswordHash)
 	return u, nil
 }

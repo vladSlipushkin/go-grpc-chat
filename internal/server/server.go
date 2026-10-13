@@ -34,6 +34,11 @@ const (
 	// minClientPingInterval is the most often a client may ping. Clients that
 	// ping more often are disconnected with GOAWAY "too_many_pings".
 	minClientPingInterval = time.Minute
+
+	// maxConcurrentStreams caps the RPCs, chat streams included, that one
+	// connection can have open at once. 100 is the lowest value RFC 9113
+	// recommends; grpc-go's default is unlimited.
+	maxConcurrentStreams = 100
 )
 
 // Options configures a Server.
@@ -78,6 +83,7 @@ func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
 
 	g := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    keepaliveTime,
 			Timeout: keepaliveTimeout,

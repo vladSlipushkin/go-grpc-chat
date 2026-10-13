@@ -155,6 +155,80 @@ func TestShutdownNotifiesWatchersThenCancelsLongRPCs(t *testing.T) {
 	}
 }
 
+func TestServeWaitsForHandlersAfterStop(t *testing.T) {
+	t.Parallel()
+
+	h := &holdService{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
+	// A zero shutdown timeout cancels running RPCs as soon as shutdown
+	// starts.
+	srv := server.New(slog.New(slog.DiscardHandler), rejectTokens{}, server.Options{PublicMethods: []string{"/test.v1.Hold/Hold"}})
+	srv.RegisterService(&holdServiceDesc, h)
+	ts := startServer(t, srv)
+
+	if _, err := ts.conn.NewStream(t.Context(), &holdServiceDesc.Streams[0], "/test.v1.Hold/Hold"); err != nil {
+		t.Fatalf("NewStream() error = %v", err)
+	}
+	waitClosed(t, h.started, "handler start")
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- ts.stop() }()
+	waitClosed(t, h.cancelled, "handler cancellation")
+
+	// The handler is now cancelled but still running. A Serve that did not
+	// wait for it would return here; give it the chance to.
+	select {
+	case <-stopped:
+		t.Fatal("Serve() returned while a handler was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(h.release)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Errorf("Serve() = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve() did not return after the handler did")
+	}
+}
+
+func TestLimitsConcurrentStreamsPerConnection(t *testing.T) {
+	t.Parallel()
+
+	ts := startServer(t, newServer(server.Options{ShutdownTimeout: time.Second}))
+	client := healthpb.NewHealthClient(ts.conn)
+
+	const maxStreams = 100 // maxConcurrentStreams in server.go
+
+	// Health watches stand in for chat streams: they stay open until
+	// cancelled.
+	cancels := make([]context.CancelFunc, 0, maxStreams)
+	for range maxStreams {
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		cancels = append(cancels, cancel)
+		watch, err := client.Watch(ctx, &healthpb.HealthCheckRequest{})
+		if err != nil {
+			t.Fatalf("Watch() error = %v", err)
+		}
+		if _, err := watch.Recv(); err != nil {
+			t.Fatalf("first Watch update: %v", err)
+		}
+	}
+
+	// One stream more waits for a free slot; the deadline ends the wait.
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := client.Check(ctx, &healthpb.HealthCheckRequest{}); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("Check() with %d streams open: err = %v, want DEADLINE_EXCEEDED", maxStreams, err)
+	}
+
+	// Freeing one slot lets the next call through.
+	cancels[0]()
+	checkHealth(t, ts.conn)
+}
+
 func TestListenerFailureShutsDownAcceptedConnections(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +284,39 @@ var panicServiceDesc = grpc.ServiceDesc{
 			return interceptor(ctx, req, info, func(context.Context, any) (any, error) { panic("boom") })
 		},
 	}},
+}
+
+// holdService has one streaming method whose handler, once cancelled, keeps
+// running until the test releases it.
+type holdService struct {
+	started, cancelled, release chan struct{}
+}
+
+var holdServiceDesc = grpc.ServiceDesc{
+	ServiceName: "test.v1.Hold",
+	HandlerType: (*any)(nil),
+	Streams: []grpc.StreamDesc{{
+		StreamName:    "Hold",
+		ClientStreams: true,
+		ServerStreams: true,
+		Handler: func(srv any, stream grpc.ServerStream) error {
+			h := srv.(*holdService)
+			close(h.started)
+			<-stream.Context().Done()
+			close(h.cancelled)
+			<-h.release
+			return stream.Context().Err()
+		},
+	}},
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
 }
 
 type testServer struct {

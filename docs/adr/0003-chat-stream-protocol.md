@@ -69,17 +69,20 @@ Non-goals for v1, each addable later without breaking the contract:
 ### Processing model
 
 - Requests of one stream are handled one at a time, in the order received.
-  Join and leave are synchronous: the room applies them before the reader
-  enqueues the `Ack` and reads the next request, so join-then-send never
-  fails with `FAILED_PRECONDITION`.
+  Join and leave are synchronous: the room applies them before the stream
+  handler queues the `Ack` and takes the next request, so join-then-send
+  never fails with `FAILED_PRECONDITION`.
 - Each connection has one first-in, first-out outbound queue and one
   goroutine that writes to the stream; gRPC does not allow concurrent sends
-  on a stream. The connection's reader enqueues `Ack` and `Error`; rooms
+  on a stream. The stream handler enqueues `Ack` and `Error`; rooms
   enqueue `Message`. Because they are enqueued by different goroutines:
   - a room's `Message` may arrive before the `Ack` for joining that room;
   - the sender's own `Message` may arrive before or after the `Ack` for
     sending it;
   - nothing from a room arrives after the `Ack` for leaving it.
+- A client that half-closes its side ends the stream: the server ends it
+  with `OK` at once and drops replies it has not sent yet, so a client that
+  needs them waits for them before closing (ADR-0009).
 - Requests are validated in the handler, not by a protovalidate stream
   interceptor. An interceptor reports a violation as a `RecvMsg` error, so the
   handler would have to tell it apart from transport errors by code and then
@@ -199,8 +202,8 @@ added later as a new action.
 ### Slow clients
 
 Each connection has an outbound queue of 64 events. Whoever finds that queue
-full, a room broadcasting a `Message` or the reader enqueueing an `Ack` or
-`Error`, closes the connection with `RESOURCE_EXHAUSTED` and reason
+full, a room broadcasting a `Message` or the handler enqueueing an `Ack`
+or `Error`, closes the connection with `RESOURCE_EXHAUSTED` and reason
 `SLOW_CLIENT`. One rule for every producer means nothing ever waits on a
 client.
 

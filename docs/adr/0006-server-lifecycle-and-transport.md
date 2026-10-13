@@ -40,14 +40,16 @@ On SIGINT or SIGTERM:
 `GracefulStop` alone would never return while a chat stream is open, because
 a stream only ends when the client or the handler ends it; a health `Watch`
 from grpcurl or a client's health checking holds it the same way. The timeout
-is the backstop.
+is the backstop. It is also what ends a chat client that has stopped
+reading: its final status waits behind data the client will not accept, so
+its connection stays open until `Stop` (ADR-0009).
 
 `GracefulStop` does not cancel the contexts of running streams; it only stops
-new RPCs. Chat stream handlers will therefore get an explicit shutdown signal
+new RPCs. Chat stream handlers therefore get an explicit shutdown signal
 from the process's root context, not from their stream context, and end
-their streams with `UNAVAILABLE` (ADR-0003). Clients then get a clear status
-and can reconnect elsewhere instead of being cut off by `Stop`; this arrives
-with the stream handler.
+their streams with `UNAVAILABLE` (ADR-0003, ADR-0009). Clients then get a
+clear status and can reconnect elsewhere instead of being cut off by
+`Stop`.
 
 `Serve` returns only after every handler has returned, including after
 `Stop`. Every handler must therefore return once its context is cancelled;
@@ -97,6 +99,21 @@ already accepted connections running.
   on that.
 - No maximum connection age: rotating connections would cut chat streams on
   a timer.
+- At most 100 concurrent streams per connection (`MaxConcurrentStreams`);
+  grpc-go's default is unlimited. RFC 9113 (section 6.5.2) recommends no
+  less than 100 so as not to limit parallelism, and one chat client needs a
+  single stream plus the occasional unary call. A client that opens more
+  waits on its side for a free slot. The bound keeps one connection from
+  holding more than 100 chat sessions, each with its own queue (ADR-0003).
+- No limit on the number of connections in the process. The usual tool,
+  `netutil.LimitListener`, stops calling `Accept` at the limit: a new client
+  is not refused but hangs in the kernel's accept backlog until its dial
+  times out, with no status to act on. A limit per client address fails
+  behind a proxy, where every connection comes from the proxy. Connection
+  limits belong to the load balancer or ingress in front of the server,
+  which the packaging stage sets up. Until then this is an accepted risk:
+  one client can open connections until the process runs out of memory or
+  file descriptors.
 
 ### Interceptors
 
@@ -146,6 +163,7 @@ asks to; `make run` turns it on for local use with grpcurl.
 - Dead clients are detected within 2 minutes 20 seconds of going silent.
 - Client implementations have to configure keepalive within the server's
   policy or be disconnected.
-- Interceptor behaviour is covered by unit tests; the shutdown sequence and
-  the receive limit are tested against a real server over an in-memory
-  connection.
+- Interceptor behaviour is covered by unit tests; the shutdown sequence,
+  `Serve` waiting for a cancelled handler after `Stop`, the stream limit and
+  the receive limit, for unary calls and inside a chat stream, are tested
+  against a real server over an in-memory connection.

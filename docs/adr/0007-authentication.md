@@ -110,8 +110,8 @@ logging, recovery, auth. The first interceptor is the outermost.
   transport does not return until the handler does. Stream handlers must
   watch the context in their main goroutine and return when it ends,
   without first waiting for a reader blocked in `RecvMsg`, which is released
-  once the handler returns. The chat stream handler, not yet written, is to be
-  tested for this with a client that stays silent past its token's expiry.
+  once the handler returns. The chat stream handler works this way
+  (ADR-0009), and a test keeps a client silent past its token's expiry.
 - An expired token on a unary call carries the same `TOKEN_EXPIRED` reason.
 - Logging puts a small holder in the context that auth fills with the user
   id, so the record written when the call ends includes `user_id`. Logging

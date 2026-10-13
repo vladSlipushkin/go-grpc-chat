@@ -69,7 +69,7 @@ func NewTokens(secret []byte, ttl time.Duration) (*Tokens, error) {
 func (t *Tokens) Issue(userID, username string) (string, time.Time, error) {
 	// JWT times have one-second precision. Truncating here keeps the
 	// returned expiry equal to the one in the token, which is also where a
-	// stream's deadline will be set.
+	// stream's deadline is set.
 	now := time.Now().Truncate(time.Second)
 	exp := now.Add(t.ttl)
 	claims := tokenClaims{

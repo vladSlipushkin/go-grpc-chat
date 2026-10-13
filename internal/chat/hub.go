@@ -114,6 +114,7 @@ func (h *Hub) stopLocked(r *room) {
 		return
 	}
 	r.stopped = true
+	// Guards against a stale room removing a successor with the same id.
 	if h.rooms[r.id] == r {
 		delete(h.rooms, r.id)
 	}

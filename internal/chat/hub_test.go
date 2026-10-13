@@ -494,6 +494,34 @@ func TestRoomPanicEndsItsMembers(t *testing.T) {
 	})
 }
 
+func TestRecreatedRoomOutlivesMembersOfFailedOne(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(t)
+		defer h.Close()
+		alice := connect(t, h, "alice")
+		join(t, alice, "general")
+		if err := chat.Crash(t.Context(), alice.Session, "general"); !errors.Is(err, chat.ErrRoomFailed) {
+			t.Fatalf("call into the crashing room = %v, want ErrRoomFailed", err)
+		}
+
+		// A new room with the same id starts before alice's handler gets to
+		// close her session.
+		carol := connect(t, h, "carol")
+		join(t, carol, "general")
+		alice.Close()
+
+		if n := chat.RoomCount(h); n != 1 {
+			t.Fatalf("RoomCount() after alice left the failed room = %d, want 1", n)
+		}
+		send(t, carol, "general", "still here")
+		if _, seq := onlyMessage(t, drain(carol)); seq != 1 {
+			t.Errorf("seq in the new room = %d, want 1", seq)
+		}
+	})
+}
+
 func TestHubCloseEndsRemainingSessions(t *testing.T) {
 	t.Parallel()
 

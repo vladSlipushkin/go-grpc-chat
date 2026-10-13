@@ -55,6 +55,12 @@ same order.
   regardless of the context: commands never block, so the wait is short,
   and abandoning it would leave the caller unsure whether its join was
   applied.
+- "Commands never block" holds only while rooms live in memory. Storing a
+  message puts I/O inside a command, and then a stalled database would
+  stall `Send`, the leave in `Session.Close` and `Hub.Close` with it. The
+  rule for that change: every I/O inside a command runs under a deadline
+  of its own, so an accepted command finishes in bounded time, and every
+  wait on the room inherits that bound.
 - Join, leave and send all return after the room applied them. A sender's
   own `Message` is therefore always queued before its `Ack`, which is
   stricter than ADR-0003 promises; clients still must not rely on it.
@@ -76,13 +82,19 @@ goroutines. That lifecycle is exactly what the registry lock takes care of.
 ### Sessions and the outbound queue
 
 A `Session` is one connection's membership. `Join`, `Leave`, `Send` and
-`Close` are called only by the stream's reader goroutine, so the session's
-own room map needs no lock. The outbound queue is a channel of 64 events
+`Close` are called only by the stream handler's goroutine (ADR-0009), so
+the session's own room map needs no lock. The outbound queue is a channel of 64 events
 read by the stream's writer.
 
 - `Enqueue` never waits. A producer that finds the queue full, a room
-  broadcasting or the reader adding an `Ack`, ends the session with
-  `ErrSlowClient` (ADR-0003).
+  broadcasting or the handler adding an `Ack`, ends the session with
+  `ErrSlowClient` (ADR-0003). Events queued after that are not sent: the
+  writer checks the session's context before each send, so the client sees
+  no gap in `seq` before the final status (ADR-0009).
+- An ended session still answers calls until `Close`, and not always
+  truthfully: a join of a room whose goroutine has failed reports success,
+  because the session counts that room as joined. The handler stops
+  applying requests once the session has ended, so no client sees it.
 - Ending a session calls the `context.CancelCauseFunc` the handler passed
   to `Connect`. The handler watches that context and reads the reason from
   `context.Cause`. The first cause wins: a session dropped as slow before
@@ -112,8 +124,8 @@ The server's `Serve` returns only after every handler has returned
 leaves its rooms. `Hub.Close` is called after that, when no room should be
 left; it stops whatever remains, ending sessions still inside with
 `ErrHubClosed`, and waits for every room goroutine to exit. Joins and new
-sessions after `Close` fail with `ErrHubClosed`. `cmd/server` wires this
-order together with the stream handler.
+sessions after `Close` fail with `ErrHubClosed`. `cmd/server` calls
+`Hub.Close` right after `Serve` returns.
 
 ### Members per room: not limited
 
@@ -123,10 +135,19 @@ member's memory is bounded by its own queue, which is counted per
 connection, not per room. A large room only slows its own goroutine:
 `BenchmarkSend` measures about 40 nanoseconds per member plus a few
 microseconds per message on a development machine, so ten thousand members
-cost under half a millisecond per message. A limit would also need a new
-error reason in the contract. What bounds the load is the number of
-connections, which belongs to the ingress and to rate limiting. Fan-out
-time per room is the metric to watch once metrics exist.
+cost under half a millisecond per message. That is a best case: the
+benchmark has no writers competing for the CPU. A limit would also need a
+new error reason in the contract. Fan-out time per room is the metric to
+watch once metrics exist.
+
+Nothing limits how fast one connection sends. An ingress limits
+connections and requests, not messages inside a long-lived stream. Each
+send waits for its room, so one client can post a few thousand messages a
+second into a large room; members whose writers fall a few tens of
+milliseconds behind then overflow their queues and are dropped as
+`SLOW_CLIENT`, although the sender is the cause. This is an accepted risk
+until the observability stage adds a per-stream message rate limit with an
+error reason of its own.
 
 ## Rejected
 
@@ -148,7 +169,7 @@ time per room is the metric to watch once metrics exist.
 
 - One goroutine per active room, none per idle room name.
 - Session methods other than `Enqueue` and `Events` are not safe for
-  concurrent use; the stream handler must keep them on its reader.
+  concurrent use; the stream handler keeps them on its own goroutine.
 - The tests run every scenario in `testing/synctest` bubbles under
   `goleak`, including concurrent joins and leaves on a room that keeps
   emptying and the order of a drop and a token expiry.

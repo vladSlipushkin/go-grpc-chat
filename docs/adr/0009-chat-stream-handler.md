@@ -81,12 +81,27 @@ What the handler guarantees on top of that:
    window remains between the check and the call. Closing it would need the
    handler to wait for the writer, which may be blocked in a `Send` that
    only the handler's return releases. A `Send` that slips through that
-   window fails at once and writes nothing: `http2Server.write` checks that
-   the stream is done (`http2_server.go`), `serverStream.writeStatus` sends
-   a status only once (`statusWritten` in `stream.go`), and stats only see
-   successful sends. This is how grpc-go behaves, not something it
-   documents, so it is to be re-checked when grpc-go is upgraded; no test
-   would notice the change.
+   window writes nothing to the client. Usually it fails at once:
+   `http2Server.write` checks that the stream is done
+   (`http2_server.go`), and `serverStream.writeStatus` sends a status
+   only once (`statusWritten` in `stream.go`). If the stream finishes
+   between that check and the hand-over to the transport's writer, `Send`
+   returns nil, but the frame is queued behind the trailers and discarded
+   when the stream is cleaned up (`controlbuf.go`).
+
+   That narrow case has two side effects. A stats handler receives an
+   `OutPayload` after `stats.End`, which matters once tracing is added;
+   and with binary logging turned on, `SendMsg` and the code after the
+   handler write the same flag without synchronization. Binary logging is
+   off and there is no stats handler today. This is how grpc-go behaves,
+   not something it documents, so it is to be re-checked when grpc-go is
+   upgraded and before a stats handler is installed; no test would notice
+   a change.
+
+   The reader has the same window with `Recv`: it may call it once more
+   after the handler returned. That call returns at once with the
+   stream's context error, or a request already buffered, which the
+   reader then drops.
 
 Rejected:
 
@@ -120,7 +135,12 @@ Rejected:
   covers ADR-0008's note that a join of a failed room reports success
   until the session closes: by then the handler no longer applies joins.
 - Every end through the session's context is logged as `chat session ended`
-  with its cause.
+  with its cause. When gRPC ends the stream itself, for an oversized or
+  undecodable request, the client gets the right status, but the log
+  usually shows `CANCELLED`: `RecvMsg` writes the status, which cancels the
+  stream's context, before the reader can report the error, and the
+  handler wakes on the cancellation first. Logging the real status would
+  need the handler to wait for the reader in that case.
 
 ### Request errors
 
@@ -145,6 +165,14 @@ context. When it closes, every handler ends its session and returns
 `UNAVAILABLE`, which lets `GracefulStop` finish without waiting for the
 timeout (ADR-0006). `cmd/server` calls `Hub.Close` after `Serve` returns,
 when every handler has left its rooms (ADR-0008).
+
+The exception is a client that has stopped reading. Its status is queued
+behind data waiting for the client's flow-control window, the stream stays
+open in the transport until it is written, and the connection holds
+`GracefulStop` until the shutdown timeout, when `Stop` closes it. The same
+holds for a client dropped as slow: it sees `SLOW_CLIENT` only if it
+starts reading again. Nothing in the handler can change this; only
+closing the connection discards the queued data.
 
 If `Serve` fails on its own, for example because the listener broke, the
 root context is not cancelled: open chat streams last until the shutdown
@@ -187,3 +215,9 @@ grpc-go v1.84.0, the version in `go.mod` when this was written:
   [internal/transport/http2_server.go#L1160-L1170](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/http2_server.go#L1160-L1170),
   and its status is not written twice:
   [stream.go#L1801-L1806](https://github.com/grpc/grpc-go/blob/v1.84.0/stream.go#L1801-L1806)
+- trailers queued behind data still waiting for flow control:
+  [internal/transport/controlbuf.go#L705-L709](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/controlbuf.go#L705-L709);
+  queued frames discarded when the stream is cleaned up:
+  [internal/transport/controlbuf.go#L817-L832](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/controlbuf.go#L817-L832);
+  a draining connection closes only once no stream is left:
+  [internal/transport/controlbuf.go#L839-L842](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/controlbuf.go#L839-L842)

@@ -86,21 +86,39 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 			end(errServerStopping)
 			return s.ended(ctx, stream.Context())
 		case err := <-recvErr:
-			// Half-close ends the session at once; replies still queued
-			// are dropped (ADR-0009).
 			if errors.Is(err, io.EOF) {
+				// A session that had already ended keeps its cause.
+				if ctx.Err() != nil {
+					return s.ended(ctx, stream.Context())
+				}
+				// Half-close ends the session at once; replies still
+				// queued are dropped (ADR-0009).
 				return nil
 			}
 			// RecvMsg has already ended the stream with this status.
 			return err
 		case req := <-reqs:
 			// select picks at random among ready cases, so a request may
-			// win over a session that has just ended; it is not applied.
+			// win over a shutdown or a session that has just ended; it is
+			// not applied then.
+			if s.stopping() {
+				end(errServerStopping)
+			}
 			if ctx.Err() != nil {
 				return s.ended(ctx, stream.Context())
 			}
 			s.apply(ctx, end, sess, req)
 		}
+	}
+}
+
+// stopping reports whether the server has started shutting down.
+func (s *ChatServer) stopping() bool {
+	select {
+	case <-s.shutdown:
+		return true
+	default:
+		return false
 	}
 }
 

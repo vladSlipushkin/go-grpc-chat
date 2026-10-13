@@ -54,11 +54,12 @@ values are too complex for `==`.
   and timers that cannot be moved into a bubble. There:
   - nothing is synchronized with `time.Sleep`; tests wait on channels,
     stream events or a polled condition;
-  - waits for something that must happen are capped generously (5 seconds)
-    and only fail a test that hangs. Heavy work is kept out of such waits
+  - waits for something that must happen are capped generously (5 seconds,
+    or 30 seconds for the whole life of a chat stream that carries hundreds
+    of messages) and only fail a test that hangs. Heavy work is kept out of such waits
     rather than given a longer cap: a test that starts the whole server
     passes the minimum bcrypt cost, since startup hashes a dummy password;
-  - a short timeout (200 ms, or a one-second token lifetime) is allowed
+  - a short timeout (200 ms, or a two-second token lifetime) is allowed
     only to cut a wait short when what it races against is in-process work
     taking microseconds, a margin of several orders of magnitude even under
     the race detector;

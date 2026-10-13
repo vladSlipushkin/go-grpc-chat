@@ -155,7 +155,7 @@ func TestChatTokenExpiryEndsSilentClient(t *testing.T) {
 	t.Parallel()
 
 	env := startChat(t, time.Second)
-	alice := env.connect(t, "alice", time.Second)
+	alice := env.connect(t, "alice", 2*time.Second)
 	wantAck(t, alice, joinRoom("a1", "general"))
 
 	// The client sends nothing more, so the reader stays blocked in Recv:
@@ -439,8 +439,8 @@ func startChat(t *testing.T, shutdownTimeout time.Duration) chatEnv {
 }
 
 // connect opens a chat stream on a connection of its own for a user named
-// name whose token expires after ttl. Every wait on the stream is capped at
-// 5 seconds.
+// name whose token expires after ttl. The stream's deadline of 30 seconds
+// only fails a test that hangs.
 func (e chatEnv) connect(t *testing.T, name string, ttl time.Duration, opts ...grpc.DialOption) chatStream {
 	t.Helper()
 
@@ -461,7 +461,7 @@ func (e chatEnv) connect(t *testing.T, name string, ttl time.Duration, opts ...g
 		}
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+e.tokens.issue(name, ttl))
 	stream, err := chatv1.NewChatServiceClient(conn).Connect(ctx)

@@ -40,7 +40,9 @@ On SIGINT or SIGTERM:
 `GracefulStop` alone would never return while a chat stream is open, because
 a stream only ends when the client or the handler ends it; a health `Watch`
 from grpcurl or a client's health checking holds it the same way. The timeout
-is the backstop.
+is the backstop. It is also what ends a chat client that has stopped
+reading: its final status waits behind data the client will not accept, so
+its connection stays open until `Stop` (ADR-0009).
 
 `GracefulStop` does not cancel the contexts of running streams; it only stops
 new RPCs. Chat stream handlers therefore get an explicit shutdown signal

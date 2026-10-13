@@ -251,20 +251,17 @@ func TestChatGoroutinePanicEndsStreamWithInternal(t *testing.T) {
 
 	join := joinRoom("a1", "general")
 	tests := []struct {
-		name      string
-		goroutine string
-		stream    func(ctx context.Context) *fakeStream
+		name   string
+		stream func(ctx context.Context) *fakeStream
 	}{
 		{
-			name:      "reader",
-			goroutine: "reader",
+			name: "reader",
 			stream: func(ctx context.Context) *fakeStream {
 				return &fakeStream{ctx: ctx, recv: func() (*chatv1.ConnectRequest, error) { panic("recv") }}
 			},
 		},
 		{
-			name:      "writer",
-			goroutine: "writer",
+			name: "writer",
 			stream: func(ctx context.Context) *fakeStream {
 				// One request, whose Ack makes the writer call Send.
 				reqs := make(chan *chatv1.ConnectRequest, 1)
@@ -301,9 +298,9 @@ func TestChatGoroutinePanicEndsStreamWithInternal(t *testing.T) {
 
 			err := srv.Connect(tt.stream(ctx))
 			assertStatus(t, err, codes.Internal, "")
-			want := fmt.Sprintf(`"goroutine":%q`, tt.goroutine)
+			want := fmt.Sprintf(`"goroutine":%q`, tt.name)
 			if !strings.Contains(logs.String(), "chat stream goroutine panicked") || !strings.Contains(logs.String(), want) {
-				t.Errorf("log = %s, want a panic record for the %s", logs.String(), tt.goroutine)
+				t.Errorf("log = %s, want a panic record for the %s", logs.String(), tt.name)
 			}
 		})
 	}

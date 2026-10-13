@@ -199,10 +199,12 @@ func TestLimitsConcurrentStreamsPerConnection(t *testing.T) {
 	ts := startServer(t, newServer(server.Options{ShutdownTimeout: time.Second}))
 	client := healthpb.NewHealthClient(ts.conn)
 
+	const maxStreams = 100 // maxConcurrentStreams in server.go
+
 	// Health watches stand in for chat streams: they stay open until
 	// cancelled.
-	cancels := make([]context.CancelFunc, 0, 100)
-	for range 100 {
+	cancels := make([]context.CancelFunc, 0, maxStreams)
+	for range maxStreams {
 		ctx, cancel := context.WithCancel(t.Context())
 		t.Cleanup(cancel)
 		cancels = append(cancels, cancel)
@@ -215,11 +217,11 @@ func TestLimitsConcurrentStreamsPerConnection(t *testing.T) {
 		}
 	}
 
-	// The 101st stream waits for a free slot; the deadline ends the wait.
+	// One stream more waits for a free slot; the deadline ends the wait.
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	if _, err := client.Check(ctx, &healthpb.HealthCheckRequest{}); status.Code(err) != codes.DeadlineExceeded {
-		t.Fatalf("Check() with 100 streams open: err = %v, want DEADLINE_EXCEEDED", err)
+		t.Fatalf("Check() with %d streams open: err = %v, want DEADLINE_EXCEEDED", maxStreams, err)
 	}
 
 	// Freeing one slot lets the next call through.

@@ -18,18 +18,13 @@ import (
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chat"
 )
 
-// Hub opens chat sessions. *chat.Hub implements it.
-type Hub interface {
-	Connect(ctx context.Context, end context.CancelCauseFunc) (*chat.Session, error)
-}
-
 // ChatServer implements chat.v1.ChatService. ADR-0009 describes how a stream
 // is served: the handler owns the session, a reader and a writer goroutine
 // move messages between it and the stream.
 type ChatServer struct {
 	chatv1.UnimplementedChatServiceServer
 
-	hub      Hub
+	hub      *chat.Hub
 	shutdown <-chan struct{}
 	logger   *slog.Logger
 }
@@ -37,8 +32,8 @@ type ChatServer struct {
 // NewChatServer returns a ChatServer backed by hub. When shutdown is closed
 // (the server passes the Done channel of its root context), every stream
 // ends with UNAVAILABLE; graceful stop alone would wait for clients to hang
-// up (ADR-0006).
-func NewChatServer(hub Hub, shutdown <-chan struct{}, logger *slog.Logger) *ChatServer {
+// up (ADR-0006). A nil shutdown never fires.
+func NewChatServer(hub *chat.Hub, shutdown <-chan struct{}, logger *slog.Logger) *ChatServer {
 	return &ChatServer{hub: hub, shutdown: shutdown, logger: logger}
 }
 

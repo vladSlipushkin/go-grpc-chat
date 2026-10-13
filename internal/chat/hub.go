@@ -114,9 +114,7 @@ func (h *Hub) stopLocked(r *room) {
 		return
 	}
 	r.stopped = true
-	// With stopped checked above, r is still the registered room here. The
-	// check makes sure a stale room can never remove a successor with the
-	// same id, should that ever change.
+	// Guards against a stale room removing a successor with the same id.
 	if h.rooms[r.id] == r {
 		delete(h.rooms, r.id)
 	}

@@ -8,8 +8,10 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chat"
 )
@@ -46,8 +48,8 @@ func TestEndedMapsCauseToStatus(t *testing.T) {
 			}
 
 			got := newTestChatServer().ended(ctx, streamCtx)
-			if status.Code(got) != status.Code(tt.want) || got.Error() != tt.want.Error() {
-				t.Errorf("ended() with cause %v = %v, want %v", tt.cause, got, tt.want)
+			if diff := cmp.Diff(status.Convert(tt.want).Proto(), status.Convert(got).Proto(), protocmp.Transform()); diff != "" {
+				t.Errorf("ended() with cause %v mismatch (-want +got):\n%s", tt.cause, diff)
 			}
 		})
 	}

@@ -71,6 +71,9 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer, bcr
 		},
 	})
 	hub := chat.NewHub(logger)
+	// Runs after Serve, which waits for every handler to close its session,
+	// so only rooms nobody holds can be left (ADR-0008).
+	defer hub.Close()
 	// Every service is registered here, before Serve (ADR-0006).
 	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(accounts, logger))
 	chatv1.RegisterChatServiceServer(srv, grpcapi.NewChatServer(hub, ctx.Done(), logger))
@@ -79,12 +82,8 @@ func run(ctx context.Context, lookupEnv config.LookupFunc, stdout io.Writer, bcr
 		slog.String("addr", lis.Addr().String()),
 		slog.Bool("reflection", cfg.Reflection),
 	)
-	serveErr := srv.Serve(ctx, lis)
-	// Serve has waited for every handler, and each closed its session, so
-	// only rooms nobody holds can be left (ADR-0008).
-	hub.Close()
-	if serveErr != nil {
-		return serveErr
+	if err := srv.Serve(ctx, lis); err != nil {
+		return err
 	}
 	logger.InfoContext(ctx, "server stopped")
 	return nil

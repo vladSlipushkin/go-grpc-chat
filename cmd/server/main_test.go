@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/goleak"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestMain(m *testing.M) {
@@ -27,14 +28,11 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var out lockedBuffer
 	errc := make(chan error, 1)
-	go func() { errc <- run(ctx, lookup, &out) }()
+	go func() { errc <- run(ctx, lookup, &out, bcrypt.MinCost) }()
 
 	// Cancel once the listener is bound, so the test covers a start that got
-	// past configuration and listening before it stops. Startup hashes the
-	// login dummy at the production bcrypt cost, which alone takes seconds
-	// under the race detector on a shared CI runner, so the cap is well above
-	// that and only catches a start that hangs.
-	waitFor(t, 30*time.Second, func() bool { return strings.Contains(out.String(), "server started") })
+	// past configuration and listening before it stops.
+	waitFor(t, 5*time.Second, func() bool { return strings.Contains(out.String(), "server started") })
 	cancel()
 
 	select {
@@ -63,7 +61,7 @@ func TestRunRejectsInvalidConfig(t *testing.T) {
 		return "", false
 	}
 
-	err := run(t.Context(), lookup, &bytes.Buffer{})
+	err := run(t.Context(), lookup, &bytes.Buffer{}, bcrypt.MinCost)
 	if err == nil || !strings.Contains(err.Error(), "CHAT_LOG_LEVEL") {
 		t.Errorf("run() = %v, want a config error mentioning CHAT_LOG_LEVEL", err)
 	}

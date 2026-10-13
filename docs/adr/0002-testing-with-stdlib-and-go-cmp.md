@@ -48,18 +48,24 @@ values are too complex for `==`.
   only when every goroutine in the bubble is blocked, so a test of a
   one-hour expiry runs instantly and asserts exact instants instead of
   ranges.
+- Faults a real client cannot cause, such as a panic inside `Send`, are
+  tested by calling the handler directly with a hand-written stream.
 - Tests that run a grpc-go server use real time: grpc-go starts goroutines
   and timers that cannot be moved into a bubble. There:
   - nothing is synchronized with `time.Sleep`; tests wait on channels,
     stream events or a polled condition;
   - waits for something that must happen are capped generously (5 seconds)
-    and only fail a test that hangs. A wait that covers heavy work of its
-    own gets a cap well above that work instead: server startup hashes a
-    bcrypt dummy at the production cost, seconds of CPU under the race
-    detector, so the test waiting for it allows 30 seconds;
-  - a short server timeout (200 ms) is allowed only to cut a wait short when
-    what it races against is in-process work taking microseconds, a margin
-    of several orders of magnitude even under the race detector.
+    and only fail a test that hangs. Heavy work is kept out of such waits
+    rather than given a longer cap: a test that starts the whole server
+    passes the minimum bcrypt cost, since startup hashes a dummy password;
+  - a short timeout (200 ms, or a one-second token lifetime) is allowed
+    only to cut a wait short when what it races against is in-process work
+    taking microseconds, a margin of several orders of magnitude even under
+    the race detector;
+  - a short pause (100 ms) is allowed where a test checks that something
+    does not happen too early, such as `Serve` returning while a handler is
+    still running. It can only let a bug slip through, never fail correct
+    code.
 
 ## Consequences
 

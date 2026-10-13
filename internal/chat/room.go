@@ -45,6 +45,8 @@ func newRoom(id string, h *Hub) *room {
 }
 
 func (r *room) run() {
+	// Deferred first, so it runs last: r.err is set before done is closed,
+	// and whoever reads r.err after <-r.done sees it.
 	defer close(r.done)
 	defer func() {
 		if v := recover(); v != nil {
@@ -82,7 +84,9 @@ func (r *room) run() {
 //
 // Once the room has accepted cmd, do waits for it regardless of ctx:
 // commands never block, so the wait is short, and giving up halfway would
-// leave the caller not knowing whether, say, its join was applied.
+// leave the caller not knowing whether, say, its join was applied. A command
+// that does I/O, such as storing a message, must bound it with a deadline of
+// its own, or this wait is unbounded (ADR-0008).
 func (r *room) do(ctx context.Context, cmd func()) error {
 	// Checked first so that a context that has already ended always wins;
 	// the select below picks at random among ready cases.

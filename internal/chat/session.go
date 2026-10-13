@@ -10,15 +10,20 @@ import (
 // its outbound queue.
 //
 // Join, Leave, Send and Close must be called from one goroutine, the
-// stream's reader; they return once the room has applied them. Enqueue and
+// stream handler's; they return once the room has applied them. Enqueue and
 // Events are safe for concurrent use.
+//
+// Once the session has ended, its handler stops calling Join, Leave and
+// Send: their results are no longer meaningful. Join of a room whose
+// goroutine failed, for one, still reports success, because the session
+// counts that room as joined until Close.
 type Session struct {
 	hub   *Hub
 	user  auth.Claims
 	end   context.CancelCauseFunc
 	queue chan Event
 
-	// Owned by the reader goroutine.
+	// Owned by the handler's goroutine.
 	rooms  map[string]*room
 	closed bool
 }

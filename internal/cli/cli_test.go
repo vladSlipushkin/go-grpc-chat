@@ -15,6 +15,7 @@ import (
 
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chattest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/cli"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/client"
 )
 
 func TestMain(m *testing.M) {
@@ -156,8 +157,8 @@ func TestRefusesPlaintextToRemoteAddress(t *testing.T) {
 			return password, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "-insecure") {
-		t.Errorf("Run() to a remote address without TLS = %v, want an error naming -insecure", err)
+	if !errors.Is(err, client.ErrPlaintext) || !strings.Contains(err.Error(), "-insecure") {
+		t.Errorf("Run() to a remote address without TLS = %v, want ErrPlaintext naming -insecure", err)
 	}
 }
 
@@ -165,15 +166,15 @@ func TestUsage(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		args    []string
-		want    error
-		wantErr string
+		name       string
+		args       []string
+		wantErr    error
+		wantStderr string
 	}{
-		{name: "no user", args: nil, want: cli.ErrUsage, wantErr: "-user is required"},
-		{name: "extra argument", args: []string{"-user", "alice", "now"}, want: cli.ErrUsage, wantErr: `unexpected argument "now"`},
-		{name: "unknown flag", args: []string{"register", "-name", "alice"}, want: cli.ErrUsage, wantErr: "flag provided but not defined: -name"},
-		{name: "help", args: []string{"-h"}, want: flag.ErrHelp, wantErr: "chat register -user NAME"},
+		{name: "no user", args: nil, wantErr: cli.ErrUsage, wantStderr: "-user is required"},
+		{name: "extra argument", args: []string{"-user", "alice", "now"}, wantErr: cli.ErrUsage, wantStderr: `unexpected argument "now"`},
+		{name: "unknown flag", args: []string{"register", "-name", "alice"}, wantErr: cli.ErrUsage, wantStderr: "flag provided but not defined: -name"},
+		{name: "help", args: []string{"-h"}, wantErr: flag.ErrHelp, wantStderr: "chat register -user NAME"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -181,11 +182,11 @@ func TestUsage(t *testing.T) {
 
 			var stderr bytes.Buffer
 			err := cli.Run(t.Context(), tt.args, cli.Env{Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: &stderr})
-			if !errors.Is(err, tt.want) {
-				t.Errorf("Run(%q) = %v, want %v", tt.args, err, tt.want)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("Run(%q) = %v, want %v", tt.args, err, tt.wantErr)
 			}
-			if !strings.Contains(stderr.String(), tt.wantErr) {
-				t.Errorf("Run(%q) printed %q, want it to contain %q", tt.args, stderr.String(), tt.wantErr)
+			if !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("Run(%q) printed %q, want it to contain %q", tt.args, stderr.String(), tt.wantStderr)
 			}
 		})
 	}

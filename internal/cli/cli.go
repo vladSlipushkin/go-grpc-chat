@@ -102,7 +102,7 @@ func parse(args []string, stderr io.Writer) (options, error) {
 func dial(o options, env Env) (*client.Conn, error) {
 	conn, err := client.Dial(o.addr, client.Options{Insecure: o.insecure, DialOptions: env.DialOptions})
 	if errors.Is(err, client.ErrPlaintext) {
-		return nil, fmt.Errorf("%s is not a loopback address, and without TLS the password and token would cross the network in plaintext; pass -insecure to connect anyway", o.addr)
+		return nil, fmt.Errorf("%w: without TLS the password and token would cross the network in plaintext; pass -insecure to connect anyway", err)
 	}
 	return conn, err
 }
@@ -153,6 +153,9 @@ func session(ctx context.Context, args []string, env Env) error {
 
 	r := newREPL(o.user, conn, env)
 	token, err := r.login(ctx)
+	if errors.Is(err, errQuit) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

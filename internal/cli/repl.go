@@ -22,6 +22,7 @@ const help = `-- commands:
    /leave [ROOM]  leave a room, the current one by default
    /use ROOM      talk in a room already joined
    /rooms         list the rooms joined
+   /help          show this list
    /quit          leave the chat (so does Ctrl+C)
    any other line is sent to the current room --`
 
@@ -125,7 +126,7 @@ func (r *repl) loop(ctx context.Context, ran <-chan struct{}) {
 			case line, ok = <-r.lines:
 			case <-ctx.Done():
 			}
-			if !ok {
+			if !ok || ctx.Err() != nil {
 				reply <- loginResult{err: errQuit}
 				return
 			}
@@ -158,16 +159,23 @@ func (r *repl) relogin(ctx context.Context) (string, error) {
 }
 
 // login asks for the password until the server accepts it or attempts run
-// out, and returns an access token. The password is not kept.
+// out, and returns an access token. The password is not kept. Ctrl+C
+// during the prompt is errQuit.
 func (r *repl) login(ctx context.Context) (string, error) {
 	for range loginAttempts {
 		password, err := readPassword(r.out, r.env, "password for "+r.user+": ")
+		if ctx.Err() != nil {
+			return "", errQuit
+		}
 		if err != nil {
 			return "", err
 		}
 		callCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 		token, err := r.conn.Login(callCtx, r.user, password)
 		cancel()
+		if ctx.Err() != nil {
+			return "", errQuit
+		}
 		if errors.Is(err, client.ErrInvalidCredentials) {
 			r.out.println(err.Error())
 			continue
@@ -217,7 +225,7 @@ func (r *repl) say(ctx context.Context, text string) {
 		r.out.println("-- not in a room; /join ROOM first --")
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	ctx, cancel := requestContext(ctx)
 	defer cancel()
 	// The message itself is printed when the room delivers it.
 	if err := r.chat.Send(ctx, r.room, text); err != nil {
@@ -230,7 +238,7 @@ func (r *repl) join(ctx context.Context, room string) {
 		r.out.println("-- usage: /join ROOM --")
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	ctx, cancel := requestContext(ctx)
 	defer cancel()
 	if err := r.chat.Join(ctx, room); err != nil {
 		r.out.printf("-- cannot join %s: %s --", room, describe(err))
@@ -248,7 +256,7 @@ func (r *repl) leave(ctx context.Context, room string) {
 		r.out.println("-- usage: /leave [ROOM] --")
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	ctx, cancel := requestContext(ctx)
 	defer cancel()
 	if err := r.chat.Leave(ctx, room); err != nil {
 		r.out.printf("-- cannot leave %s: %s --", room, describe(err))
@@ -258,6 +266,14 @@ func (r *repl) leave(ctx context.Context, room string) {
 		r.room = ""
 	}
 	r.out.printf("-- left %s --", room)
+}
+
+// requestContext bounds a request by requestTimeout but not by Ctrl+C: a
+// request already sent is answered before the session closes, so the
+// screen does not say "not sent" about a message the room has delivered.
+// A second Ctrl+C ends the process.
+func requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
 }
 
 func (r *repl) use(room string) {
@@ -300,7 +316,7 @@ func (r *repl) print(events <-chan client.Event) {
 			}
 			r.out.printf("-- missed %d %s in %s --", e.Count, noun, e.Room)
 		case client.Disconnected:
-			if client.Reason(e.Err) == "TOKEN_EXPIRED" {
+			if client.Reason(e.Err) == client.ReasonTokenExpired {
 				// The login prompt says it.
 				continue
 			}
@@ -324,9 +340,9 @@ func describe(err error) string {
 	switch {
 	case errors.Is(err, client.ErrNotConnected):
 		return "not connected, still trying"
-	case errors.Is(err, client.ErrConnectionLost):
-		return "connection lost before the server replied; it may have gone through"
-	case client.Reason(err) == "SLOW_CLIENT":
+	case errors.Is(err, client.ErrConnectionLost), errors.Is(err, client.ErrNoReply):
+		return "no reply from the server; it may have gone through"
+	case client.Reason(err) == client.ReasonSlowClient:
 		return "dropped for reading too slowly"
 	case status.Code(err) == codes.Unavailable:
 		return "server unavailable"

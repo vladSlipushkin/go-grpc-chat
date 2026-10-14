@@ -112,6 +112,29 @@ Rejected:
   expiry would cancel a context nobody watches.
 - **Waiting for the reader and the writer with a `sync.WaitGroup`.** The
   same deadlock, one step removed.
+- **Applying requests in the reader, with a mutex on `Session`.** This is
+  where ADR-0008 first put them. The handler must call `Session.Close`
+  before it returns, so that every room is empty once `Serve` returns and
+  `Hub.Close` only stops rooms nobody is in (ADR-0008); it cannot leave that
+  to the reader, which may be blocked in `Recv`. With a mutex, `Close` would
+  wait for a `Join` the reader holds for a whole room command, which with
+  storage includes a database round trip: the lock held across I/O that
+  ADR-0008 rejected for rooms. Applying requests in the handler keeps every
+  `Session` call on one goroutine without a lock. The unbuffered channel
+  between them also means the reader takes the next request from gRPC only
+  after the handler has taken the previous one, so backpressure reaches
+  HTTP/2 flow control and no unbounded queue sits in between.
+- **`context.AfterFunc` on the root context instead of a shutdown
+  channel.** `AfterFunc(root, func() { end(errServerStopping) })` in
+  `Connect` would make shutdown one more cancellation of the session's
+  context, and the separate `select` case and the `stopping` check after
+  taking a request would go. It needs the root context itself in
+  `ChatServer`, a context stored in a struct; the done channel carries only
+  the signal, which is all the handler uses. Each stream would also register
+  a callback on the root context and has to remove it with the returned
+  `stop` on the way out. With in-memory rooms nothing in `apply` blocks, so
+  seeing shutdown inside a room command earlier gains nothing yet. Worth
+  revisiting if more places in the handler come to need the signal.
 
 ### How a stream ends
 
@@ -127,15 +150,27 @@ Rejected:
 
 - Half-close ends the session at once: leaving rooms is what a client that
   is done wants, and keeping the stream open only to receive would make
-  half-close a second way of subscribing. Replies the writer has not yet
-  sent are dropped; a client that needs them waits for them before closing.
+  half-close a second way of subscribing. Every request read before it is
+  applied: the reader hands each one over on an unbuffered channel before
+  it calls `Recv` again, so `io.EOF` reaches the handler only after the
+  last request. Their replies may be lost: the writer races the handler's
+  return, and what it has not sent by then is discarded. A client that
+  needs them waits for them before closing. A tool that half-closes at the
+  end of its input, such as grpcurl reading requests from a pipe, may show
+  no replies at all.
+- A half-close after the session has ended keeps the session's cause. One
+  that arrives after the token expired ends with `TOKEN_EXPIRED`, not `OK`:
+  the auth interceptor cannot tell a nil result after expiry from one
+  caused by it (ADR-0007).
 - `select` picks at random among ready cases, so a request can be taken in
   the same moment the session ends. The handler checks the session's
   context after taking a request and does not apply it then. That also
   covers ADR-0008's note that a join of a failed room reports success
   until the session closes: by then the handler no longer applies joins.
 - Every end through the session's context is logged as `chat session ended`
-  with its cause. When gRPC ends the stream itself, for an oversized or
+  with its cause. A half-close is not: it is the normal way out, and the
+  logging interceptor's `rpc finished` record with code `OK` covers it.
+  When gRPC ends the stream itself, for an oversized or
   undecodable request, the client gets the right status, but the log
   usually shows `CANCELLED`: `RecvMsg` writes the status, which cancels the
   stream's context, before the reader can report the error, and the
@@ -158,6 +193,17 @@ panic with its stack and end the session, so the stream ends with
 `INTERNAL`. A panic in the handler itself is the interceptor's, and the
 handler's deferred cleanup (cancel, `Session.Close`) still runs.
 
+### Logging
+
+The handler, the reader and the writer log with `user_id` and `peer`, the
+attributes the logging interceptor puts in the call's `rpc finished`
+record, so `chat session ended` and the other records of a stream can be
+matched with its final code. `Connect` adds them once with `logger.With`.
+
+Rejected: a `slog.Handler` that reads them from the context. Every record in
+the process would pay for the lookups, and the interceptor's record, which
+sets them itself, would carry them twice.
+
 ### Shutdown
 
 `grpcapi.NewChatServer` gets the done channel of the process's root
@@ -178,6 +224,25 @@ If `Serve` fails on its own, for example because the listener broke, the
 root context is not cancelled: open chat streams last until the shutdown
 timeout and end with `CANCELLED` when `Stop` closes them. That path is rare
 enough not to warrant a second signal.
+
+### A client dropped as slow
+
+Dropping a client as slow releases what the chat service holds at once: the
+handler returns, the session leaves its rooms and its queue is freed. What
+remains is in the transport, for a client that stopped reading but keeps
+its connection:
+
+- the events the writer had already handed to `Send`, at most about 64 KiB
+  per stream (grpc-go's per-stream write quota), and the trailers queued
+  behind them, waiting for the client's flow-control window;
+- the stream itself, which keeps one of the connection's 100 stream slots
+  (ADR-0006) until its trailers are written.
+
+Keepalive does not end this: the client's transport still answers pings.
+It lasts until the client reads again or its connection closes; a client
+that is gone is found by keepalive within 2 minutes 20 seconds. The cost is
+bounded per stream, and per process only as far as the number of
+connections is (ADR-0006).
 
 ## Consequences
 
@@ -221,3 +286,8 @@ grpc-go v1.84.0, the version in `go.mod` when this was written:
   [internal/transport/controlbuf.go#L817-L832](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/controlbuf.go#L817-L832);
   a draining connection closes only once no stream is left:
   [internal/transport/controlbuf.go#L839-L842](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/controlbuf.go#L839-L842)
+- the per-stream write quota:
+  [internal/transport/defaults.go#L46](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/defaults.go#L46);
+  a finished stream leaves the active set only when its trailers are
+  written:
+  [internal/transport/http2_server.go#L1317-L1359](https://github.com/grpc/grpc-go/blob/v1.84.0/internal/transport/http2_server.go#L1317-L1359)

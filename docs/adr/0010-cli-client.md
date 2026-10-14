@@ -64,10 +64,15 @@ goroutine that reads it until it ends.
   cannot see.
 - While the session is reconnecting, requests wait for the new stream until
   their context ends (10 seconds in the CLI) instead of failing at once.
-- A request whose stream breaks before the reply fails with
-  `ErrConnectionLost`. A send is not retried: it may have been applied, and
-  sending it again could post it twice (ADR-0003). Joins need no retry,
-  since the rejoin restores them.
+- Joins and leaves are idempotent (ADR-0003), so one whose stream breaks
+  before the reply is sent again on the next stream, after the rejoin, and
+  returns once that one is answered. A lost leave therefore cannot be undone
+  by the rejoin, and a lost join is not silently dropped.
+- A send whose stream breaks before the reply fails with
+  `ErrConnectionLost`, and one whose context ends first fails with
+  `ErrNoReply`. Neither is retried: the message may have been delivered, and
+  sending it again could post it twice (ADR-0003). The CLI says it may have
+  gone through.
 
 ### Reconnecting
 
@@ -84,6 +89,10 @@ repeat it: a rejected token, or `RESOURCE_EXHAUSTED` other than
   instant. Keeping half of the wait fixed means no client retries
   immediately. The count starts again after a stream on which the server
   replied.
+- gRPC reconnects the connection underneath with a backoff of its own, and
+  while it waits a new stream fails at once. Its default grows to two
+  minutes, which would decide when a session returns after a long outage,
+  so the client sets it to the same bounds.
 - The stream given up is cancelled through its context before the next one
   opens, so it does not linger on the server holding a stream slot
   (ADR-0006).
@@ -138,6 +147,11 @@ the stream and wait for the server to end it with `OK`. The whole sequence is
 bounded at 5 seconds, after which the stream is cancelled. A second Ctrl+C
 ends the process at once.
 
+Ctrl+C does not cancel a request already sent: the server applies it before
+it sees the half-close, so the screen would claim "not sent" about a message
+the room delivered. A request is bounded by its own 10-second timeout
+instead.
+
 ### Keepalive
 
 The client pings after 90 seconds without traffic and gives up on the
@@ -169,7 +183,9 @@ and `-tls` with a CA file on the client.
   sessions; reconnecting after a server restart and after `SLOW_CLIENT`,
   with the rooms joined again; logging in again after `TOKEN_EXPIRED`;
   `Close` waiting for every reply; a room's `seq` starting over without a
-  false gap; a rejected token ending the session; events from a newer
-  server being ignored; and whole terminal sessions in the CLI, including
-  the re-login prompt. `docs/manual-testing.md` describes the same checks by
+  false gap; a rejected token ending the session. Hand-written servers
+  cover what the real one does not do on demand: a stream that breaks
+  before replying (the join is sent again, the send is not), a request
+  never answered, and events from a newer server. The CLI is tested as whole
+  terminal sessions, including the re-login prompt. `docs/manual-testing.md` describes the same checks by
   hand.

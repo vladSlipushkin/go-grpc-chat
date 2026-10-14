@@ -37,6 +37,9 @@ var (
 	ErrRoomLimit = errors.New("room limit reached")
 	// ErrNotMember reports a message sent to a room not joined.
 	ErrNotMember = errors.New("not a member of the room")
+	// ErrRateLimited reports a message sent faster than the server allows.
+	// It was not posted; the stream stays open.
+	ErrRateLimited = errors.New("sending too fast")
 )
 
 const (
@@ -595,6 +598,8 @@ func requestError(sp *spb.Status) error {
 	switch {
 	case Reason(err) == ReasonRoomLimit:
 		return ErrRoomLimit
+	case Reason(err) == ReasonRateLimited:
+		return ErrRateLimited
 	case status.Code(err) == codes.FailedPrecondition:
 		// The only precondition in the contract (ADR-0003).
 		return ErrNotMember

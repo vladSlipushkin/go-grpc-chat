@@ -111,9 +111,18 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	alice.join(t, "general")
 	bob.join(t, "general")
 
-	const sent = 200
-	for i := range sent {
-		bob.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
+	// One stream may not post this fast (ADR-0008): each sender joins for a
+	// handful of messages, well within the server's burst, and leaves.
+	const sent, perSender = 200, 5
+	for i := 0; i < sent; i += perSender {
+		sender := connect(t, srv, fmt.Sprintf("sender-%d", i), options{})
+		sender.join(t, "general")
+		for j := range perSender {
+			sender.say(t, fmt.Sprintf("%03d%s", i+j, strings.Repeat("x", 4000)))
+		}
+		if err := sender.chat.Leave(ctxFor(t), "general"); err != nil {
+			t.Fatalf("Leave(%s) error = %v", sender.name, err)
+		}
 	}
 
 	var got int64
@@ -202,6 +211,8 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 			acked++
 		case errors.Is(err, client.ErrClosed):
 			// Refused before it was sent.
+		case errors.Is(err, client.ErrRateLimited):
+			// Answered, but past the server's burst and not posted.
 		default:
 			t.Errorf("Send() = %v, want nil or ErrClosed: Close must not cut a request short", err)
 		}
@@ -217,6 +228,24 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 	if delivered != acked {
 		t.Errorf("bob got %d of alice's messages, want the %d she had acknowledged", delivered, acked)
 	}
+}
+
+func TestChatSendingTooFastKeepsStreamOpen(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice := connect(t, srv, "alice", options{})
+	alice.join(t, "general")
+
+	// Far more than the server's burst, sent as fast as replies come back.
+	var err error
+	for i := 0; i < 100 && err == nil; i++ {
+		err = alice.chat.Send(ctxFor(t), "general", fmt.Sprint(i))
+	}
+	if !errors.Is(err, client.ErrRateLimited) {
+		t.Fatalf("Send() past the server's burst = %v, want ErrRateLimited", err)
+	}
+	alice.join(t, "random")
 }
 
 func TestChatSeqRestartIsNotAGap(t *testing.T) {

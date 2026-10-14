@@ -203,4 +203,5 @@ const (
 	ReasonTokenExpired = "TOKEN_EXPIRED"
 	ReasonSlowClient   = "SLOW_CLIENT"
 	ReasonRoomLimit    = "ROOM_LIMIT_EXCEEDED"
+	ReasonRateLimited  = "RATE_LIMITED"
 )

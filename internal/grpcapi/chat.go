@@ -7,12 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"runtime/debug"
+	"time"
 
 	"buf.build/go/protovalidate"
+	"golang.org/x/time/rate"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
@@ -41,6 +44,14 @@ func NewChatServer(hub *chat.Hub, shutdown <-chan struct{}, logger *slog.Logger)
 
 // errorDomain is the ErrorInfo domain of the chat API (ADR-0003).
 const errorDomain = "chat.v1"
+
+// messageInterval and messageBurst limit how fast one stream posts: a
+// message every 200 ms on average, five a second, and ten at once
+// (ADR-0008).
+const (
+	messageInterval = 200 * time.Millisecond
+	messageBurst    = 10
+)
 
 var (
 	errSlowClient        = mustErrorInfo(codes.ResourceExhausted, "outbound queue full", "SLOW_CLIENT")
@@ -76,6 +87,9 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	}
 	defer sess.Close()
 
+	// Per stream, like the session: a client cannot spend another
+	// client's allowance (ADR-0008).
+	limiter := rate.NewLimiter(rate.Every(messageInterval), messageBurst)
 	reqs := make(chan *chatv1.ConnectRequest)
 	// Buffered so that the reader never blocks on reporting its last error.
 	recvErr := make(chan error, 1)
@@ -111,7 +125,7 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 			if ctx.Err() != nil {
 				return ended(ctx, stream.Context(), logger)
 			}
-			apply(ctx, logger, end, sess, req)
+			apply(ctx, logger, end, sess, limiter, req)
 		}
 	}
 }
@@ -209,7 +223,7 @@ func recoverPanic(ctx context.Context, logger *slog.Logger, end context.CancelCa
 
 // apply runs one request and queues its Ack or Error. Errors that concern
 // the whole connection end the session instead.
-func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, sess *chat.Session, req *chatv1.ConnectRequest) {
+func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, sess *chat.Session, limiter *rate.Limiter, req *chatv1.ConnectRequest) {
 	if err := protovalidate.Validate(req); err != nil {
 		sess.Enqueue(invalid(ctx, logger, req, err))
 		return
@@ -226,7 +240,18 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 	case *chatv1.ConnectRequest_LeaveRoom:
 		err = sess.Leave(ctx, a.LeaveRoom.GetRoomId())
 	case *chatv1.ConnectRequest_SendMessage:
+		// Only messages posted use up a token: a rejected one gives its
+		// reservation back (ADR-0008).
+		r := limiter.Reserve()
+		if wait := r.Delay(); wait > 0 {
+			r.Cancel()
+			sess.Enqueue(chat.Rejection{RequestID: id, Err: rateLimited(wait)})
+			return
+		}
 		messageID, err = sess.Send(ctx, a.SendMessage.GetRoomId(), a.SendMessage.GetText())
+		if err != nil {
+			r.Cancel()
+		}
 	default:
 		// An action added to the contract but not handled here yet.
 		sess.Enqueue(chat.Rejection{RequestID: id, Err: errUnsupportedAction})
@@ -246,6 +271,19 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 		// ErrHubClosed, ErrRoomFailed or a failure inside the hub.
 		end(err)
 	}
+}
+
+// rateLimited reports a message sent too fast, with how long to wait.
+func rateLimited(wait time.Duration) error {
+	st, err := status.New(codes.ResourceExhausted, "sending too fast").WithDetails(
+		&errdetails.ErrorInfo{Reason: "RATE_LIMITED", Domain: errorDomain},
+		&errdetails.RetryInfo{RetryDelay: durationpb.New(wait)},
+	)
+	if err != nil {
+		// As in mustErrorInfo: these details always marshal.
+		panic(err)
+	}
+	return st.Err()
 }
 
 // invalid builds the Error for a request that fails validation. The

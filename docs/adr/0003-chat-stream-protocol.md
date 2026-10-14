@@ -150,7 +150,7 @@ Errors are split by what they affect:
 
 | Scope | Reported as | Codes |
 |---|---|---|
-| One request | `Error{request_id, status}` in the stream; the stream stays open | `INVALID_ARGUMENT` (request fails validation), `FAILED_PRECONDITION` (send to a room not joined), `RESOURCE_EXHAUSTED` (room limit) |
+| One request | `Error{request_id, status}` in the stream; the stream stays open | `INVALID_ARGUMENT` (request fails validation), `FAILED_PRECONDITION` (send to a room not joined), `RESOURCE_EXHAUSTED` (room limit, message rate) |
 | The connection | the stream ends with a gRPC status | `UNAUTHENTICATED` (missing, invalid or expired token), `RESOURCE_EXHAUSTED` (client too slow), `UNAVAILABLE` (server shutting down), `INTERNAL` (unexpected failure) |
 
 `Error.status` is a `google.rpc.Status`, the same model gRPC uses for call
@@ -159,6 +159,8 @@ several causes, the status carries a `google.rpc.ErrorInfo` detail with
 domain `chat.v1` and one of these reasons:
 
 - `ROOM_LIMIT_EXCEEDED`: the join would exceed 16 rooms (in the stream);
+- `RATE_LIMITED`: the connection posts messages faster than the server
+  allows (in the stream, with a `google.rpc.RetryInfo`; ADR-0008);
 - `SLOW_CLIENT`: the outbound queue was full (ends the stream);
 - `TOKEN_EXPIRED`: the access token expired (ends the stream).
 

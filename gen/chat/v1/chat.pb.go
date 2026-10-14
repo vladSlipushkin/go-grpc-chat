@@ -230,6 +230,9 @@ func (x *LeaveRoom) GetRoomId() string {
 
 // SendMessage posts text to a room the connection has joined; otherwise it
 // fails with FAILED_PRECONDITION. The sender is taken from the access token.
+// A connection that posts faster than the server allows gets
+// RESOURCE_EXHAUSTED with reason RATE_LIMITED and a google.rpc.RetryInfo
+// saying when to try again; the stream stays open.
 type SendMessage struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	RoomId string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
@@ -445,7 +448,9 @@ func (x *Ack) GetMessageId() string {
 }
 
 // Error reports a failed request. The stream stays open; errors that affect
-// the whole connection end the stream with a gRPC status instead.
+// the whole connection end the stream with a gRPC status instead. Where one
+// code has several causes, the status carries a google.rpc.ErrorInfo with
+// domain "chat.v1" and a reason: ROOM_LIMIT_EXCEEDED or RATE_LIMITED.
 type Error struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Empty when the failed request had no valid request_id.

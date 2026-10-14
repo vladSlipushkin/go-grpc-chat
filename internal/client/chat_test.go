@@ -111,9 +111,16 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	alice.join(t, "general")
 	bob.join(t, "general")
 
-	const sent = 200
-	for i := range sent {
-		bob.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
+	// One stream may not post this fast (ADR-0008): each sender posts a
+	// handful of messages, well within the server's burst. Their events are
+	// relayed into buffers, so they keep up with the room.
+	const sent, perSender = 200, 5
+	for start := 0; start < sent; start += perSender {
+		sender := connect(t, srv, fmt.Sprintf("sender-%d", start), options{})
+		sender.join(t, "general")
+		for i := start; i < start+perSender; i++ {
+			sender.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
+		}
 	}
 
 	var got int64
@@ -182,7 +189,8 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 	alice.join(t, "general")
 	bob.join(t, "general")
 
-	const sends = 20
+	// Within the server's burst (ADR-0008), so every reply is an Ack.
+	const sends = 10
 	ctx := ctxFor(t)
 	results := make(chan error, sends)
 	for i := range sends {
@@ -216,6 +224,35 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 	}
 	if delivered != acked {
 		t.Errorf("bob got %d of alice's messages, want the %d she had acknowledged", delivered, acked)
+	}
+}
+
+func TestChatSendingTooFastKeepsStreamOpen(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice := connect(t, srv, "alice", options{})
+	alice.join(t, "general")
+
+	// Far more than the server's burst, sent as fast as replies come back.
+	var err error
+	for i := 0; i < 100 && err == nil; i++ {
+		err = alice.chat.Send(ctxFor(t), "general", fmt.Sprint(i))
+	}
+	if !errors.Is(err, client.ErrRateLimited) {
+		t.Fatalf("Send() past the server's burst = %v, want ErrRateLimited", err)
+	}
+	alice.join(t, "random")
+	// Everything relayed so far is in the buffer: no reconnect happened.
+	for {
+		select {
+		case e := <-alice.events:
+			if d, ok := e.(client.Disconnected); ok {
+				t.Fatalf("stream ended after RATE_LIMITED: %v", d.Err)
+			}
+		default:
+			return
+		}
 	}
 }
 

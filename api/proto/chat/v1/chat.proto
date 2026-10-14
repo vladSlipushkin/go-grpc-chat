@@ -57,6 +57,9 @@ message LeaveRoom {
 
 // SendMessage posts text to a room the connection has joined; otherwise it
 // fails with FAILED_PRECONDITION. The sender is taken from the access token.
+// A connection that posts faster than the server allows gets
+// RESOURCE_EXHAUSTED with reason RATE_LIMITED and a google.rpc.RetryInfo
+// saying when to try again; the stream stays open.
 message SendMessage {
   string room_id = 1 [(buf.validate.field).string = {
     max_len: 64
@@ -95,7 +98,9 @@ message Ack {
 }
 
 // Error reports a failed request. The stream stays open; errors that affect
-// the whole connection end the stream with a gRPC status instead.
+// the whole connection end the stream with a gRPC status instead. Where one
+// code has several causes, the status carries a google.rpc.ErrorInfo with
+// domain "chat.v1" and a reason: ROOM_LIMIT_EXCEEDED or RATE_LIMITED.
 message Error {
   // Empty when the failed request had no valid request_id.
   string request_id = 1;

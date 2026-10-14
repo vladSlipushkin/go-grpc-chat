@@ -340,6 +340,8 @@ func describe(err error) string {
 	switch {
 	case errors.Is(err, client.ErrNotConnected):
 		return "not connected, still trying"
+	case errors.Is(err, client.ErrRateLimited):
+		return "sending too fast; wait a moment"
 	case errors.Is(err, client.ErrConnectionLost), errors.Is(err, client.ErrNoReply):
 		return "no reply from the server; it may have gone through"
 	case client.Reason(err) == client.ReasonSlowClient:

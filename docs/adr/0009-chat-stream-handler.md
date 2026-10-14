@@ -182,9 +182,10 @@ Rejected:
 
 Requests are validated in the handler (ADR-0003) with the same
 `google.rpc.BadRequest` shape the unary validator uses. The `request_id` is
-echoed in the `Error` only if it is itself valid. `ROOM_LIMIT_EXCEEDED` and
-`FAILED_PRECONDITION` (send to a room not joined) are request errors; a
-hub or room failure during a request ends the session instead.
+echoed in the `Error` only if it is itself valid. `ROOM_LIMIT_EXCEEDED`,
+`RATE_LIMITED` (ADR-0008) and `FAILED_PRECONDITION` (send to a room not
+joined) are request errors; a hub or room failure during a request ends
+the session instead.
 
 ### Panics
 

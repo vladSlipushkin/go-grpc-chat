@@ -75,6 +75,8 @@ goroutine that reads it until it ends.
   `ErrNoReply`. Neither is retried: the message may have been delivered, and
   sending it again could post it twice (ADR-0003). The CLI says it may have
   gone through.
+- A send over the server's rate limit fails with `ErrRateLimited` and is not
+  retried either: the user decides whether to send it again (ADR-0008).
 
 ### Reconnecting
 

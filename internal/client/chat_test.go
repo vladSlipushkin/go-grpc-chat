@@ -1,0 +1,557 @@
+package client_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"go.uber.org/goleak"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/chattest"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/client"
+)
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
+
+const password = "correct horse"
+
+func TestChatJoinSendLeave(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice, bob := connect(t, srv, "alice", options{}), connect(t, srv, "bob", options{})
+	alice.join(t, "general")
+	bob.join(t, "general")
+
+	alice.say(t, "hello")
+	want := client.Message{Room: "general", Sender: "alice", Text: "hello", Seq: 1}
+	for _, u := range []*user{alice, bob} {
+		if diff := cmp.Diff(want, u.message(t), ignoreIdentity); diff != "" {
+			t.Errorf("%s's message mismatch (-want +got):\n%s", u.name, diff)
+		}
+	}
+
+	if err := alice.chat.Leave(ctxFor(t), "general"); err != nil {
+		t.Fatalf("Leave() error = %v", err)
+	}
+	if rooms := alice.chat.Rooms(); len(rooms) != 0 {
+		t.Errorf("Rooms() after leaving = %v, want none", rooms)
+	}
+	if err := alice.chat.Send(ctxFor(t), "general", "still here?"); !errors.Is(err, client.ErrNotMember) {
+		t.Errorf("Send() after leaving = %v, want ErrNotMember", err)
+	}
+}
+
+func TestChatRejoinsAfterServerRestart(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice, bob := connect(t, srv, "alice", options{}), connect(t, srv, "bob", options{})
+	alice.join(t, "general")
+	alice.join(t, "random")
+	bob.join(t, "general")
+	bob.say(t, "before")
+	alice.message(t)
+	bob.message(t)
+
+	srv.Restart(t)
+
+	for _, u := range []*user{alice, bob} {
+		d := waitFor[client.Disconnected](t, u)
+		if code := status.Code(d.Err); code != codes.Unavailable {
+			t.Errorf("%s disconnected with %v, want UNAVAILABLE", u.name, d.Err)
+		}
+	}
+	if got := waitFor[client.Connected](t, alice); !cmp.Equal(got.Rooms, []string{"general", "random"}) {
+		t.Errorf("alice reconnected with rooms %v, want [general random]", got.Rooms)
+	}
+	waitFor[client.Connected](t, bob)
+
+	// The new server's room starts from seq 1 again, which is not a gap.
+	bob.say(t, "after")
+	want := client.Message{Room: "general", Sender: "bob", Text: "after", Seq: 1}
+	if diff := cmp.Diff(want, alice.message(t), ignoreIdentity); diff != "" {
+		t.Errorf("alice's message after the restart mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestChatRejoinsAfterSlowClient(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	// Alice reads her events only when the test does. A fixed 64 KiB window
+	// keeps the server's writer from buffering without bound, so the
+	// server's queue for her fills up (as in the server's own test).
+	alice := connect(t, srv, "alice", options{
+		unread: true,
+		dial: []grpc.DialOption{
+			grpc.WithInitialWindowSize(64 << 10),
+			grpc.WithInitialConnWindowSize(64 << 10),
+		},
+	})
+	bob := connect(t, srv, "bob", options{})
+	waitFor[client.Connected](t, alice)
+	alice.join(t, "general")
+	bob.join(t, "general")
+
+	const sent = 200
+	for i := range sent {
+		bob.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
+	}
+
+	var got int64
+	for {
+		e := alice.next(t)
+		if d, ok := e.(client.Disconnected); ok {
+			if reason := client.Reason(d.Err); reason != "SLOW_CLIENT" {
+				t.Fatalf("alice disconnected with %v, want SLOW_CLIENT", d.Err)
+			}
+			break
+		}
+		m, ok := e.(client.Message)
+		if !ok {
+			t.Fatalf("alice got %#v before being dropped, want only messages", e)
+		}
+		got++
+		if m.Seq != got {
+			t.Fatalf("message %d has seq %d: a gap before the drop", got, m.Seq)
+		}
+	}
+	if got >= sent {
+		t.Errorf("alice received all %d messages, want her dropped before the end", sent)
+	}
+	if c := waitFor[client.Connected](t, alice); !cmp.Equal(c.Rooms, []string{"general"}) {
+		t.Errorf("alice reconnected with rooms %v, want [general]", c.Rooms)
+	}
+
+	bob.say(t, "welcome back")
+	if m := alice.message(t); m.Text != "welcome back" {
+		t.Errorf("alice's message after reconnecting = %q, want %q", m.Text, "welcome back")
+	}
+}
+
+func TestChatLogsInAgainAfterTokenExpiry(t *testing.T) {
+	t.Parallel()
+
+	// A two-second token: the expiry races nothing but in-process work
+	// (ADR-0002).
+	srv := chattest.Start(t, chattest.Options{TokenTTL: 2 * time.Second})
+	var logins atomic.Int32
+	alice := connect(t, srv, "alice", options{relogin: func(ctx context.Context, conn *client.Conn) (string, error) {
+		logins.Add(1)
+		tok, err := conn.Login(ctx, "alice", password)
+		return tok.Value, err
+	}})
+	alice.join(t, "general")
+
+	d := waitFor[client.Disconnected](t, alice)
+	if reason := client.Reason(d.Err); reason != "TOKEN_EXPIRED" || d.RetryIn != 0 {
+		t.Fatalf("Disconnected = %+v, want TOKEN_EXPIRED without a retry delay", d)
+	}
+	if c := waitFor[client.Connected](t, alice); !cmp.Equal(c.Rooms, []string{"general"}) {
+		t.Errorf("alice reconnected with rooms %v, want [general]", c.Rooms)
+	}
+	if n := logins.Load(); n != 1 {
+		t.Errorf("Relogin called %d times, want 1", n)
+	}
+	alice.say(t, "back again")
+}
+
+func TestChatCloseWaitsForReplies(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice, bob := connect(t, srv, "alice", options{}), connect(t, srv, "bob", options{})
+	alice.join(t, "general")
+	bob.join(t, "general")
+
+	const sends = 20
+	ctx := ctxFor(t)
+	results := make(chan error, sends)
+	for i := range sends {
+		go func() { results <- alice.chat.Send(ctx, "general", fmt.Sprint(i)) }()
+	}
+	// One of her messages is back, so at least that request is in flight
+	// or answered when Close starts.
+	alice.message(t)
+	if err := alice.chat.Close(ctxFor(t)); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	acked := 0
+	for range sends {
+		switch err := <-results; {
+		case err == nil:
+			acked++
+		case errors.Is(err, client.ErrClosed):
+			// Refused before it was sent.
+		default:
+			t.Errorf("Send() = %v, want nil or ErrClosed: Close must not cut a request short", err)
+		}
+	}
+
+	// Bob's marker follows everything alice had sent: the room orders
+	// messages, and alice's were acknowledged before Close returned.
+	bob.say(t, "end")
+	delivered := 0
+	for m := bob.message(t); m.Text != "end"; m = bob.message(t) {
+		delivered++
+	}
+	if delivered != acked {
+		t.Errorf("bob got %d of alice's messages, want the %d she had acknowledged", delivered, acked)
+	}
+}
+
+func TestChatSeqRestartIsNotAGap(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	alice, bob := connect(t, srv, "alice", options{}), connect(t, srv, "bob", options{})
+	alice.join(t, "general")
+	bob.join(t, "general")
+	bob.say(t, "one")
+	bob.say(t, "two")
+	if m := alice.messageAfter(t, "one"); m.Seq != 2 {
+		t.Fatalf("second message has seq %d, want 2", m.Seq)
+	}
+
+	// The room empties, and its next run counts from 1 again.
+	for _, u := range []*user{alice, bob} {
+		if err := u.chat.Leave(ctxFor(t), "general"); err != nil {
+			t.Fatalf("Leave(%s) error = %v", u.name, err)
+		}
+	}
+	alice.join(t, "general")
+	bob.join(t, "general")
+	bob.say(t, "three")
+
+	e := alice.next(t)
+	if m, ok := e.(client.Message); !ok || m.Text != "three" || m.Seq != 1 {
+		t.Errorf("alice's next event = %#v, want message three with seq 1 and no Missed", e)
+	}
+}
+
+func TestChatEndsOnRejectedToken(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	conn := dial(t, srv, nil)
+	chat := conn.NewChat("forged", client.ChatOptions{})
+	go func() {
+		for range chat.Events() {
+		}
+	}()
+	if err := chat.Run(ctxFor(t)); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("Run() with a forged token = %v, want UNAUTHENTICATED", err)
+	}
+	if err := chat.Join(ctxFor(t), "general"); !errors.Is(err, client.ErrClosed) {
+		t.Errorf("Join() after Run returned = %v, want ErrClosed", err)
+	}
+}
+
+func TestChatIgnoresUnknownEvents(t *testing.T) {
+	t.Parallel()
+
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer()
+	chatv1.RegisterChatServiceServer(gs, futureServer{})
+	served := make(chan error, 1)
+	go func() { served <- gs.Serve(lis) }()
+	t.Cleanup(func() {
+		gs.Stop()
+		if err := <-served; err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	})
+
+	conn, err := client.Dial("passthrough:///future", client.Options{
+		Insecure: true,
+		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		})},
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	})
+	u := start(t, "alice", conn.NewChat("token", client.ChatOptions{}), true)
+	u.join(t, "general")
+	// The unknown event produces nothing; the message comes next.
+	if m := u.message(t); m.Text != "from the future" {
+		t.Errorf("message after the unknown event = %q, want %q", m.Text, "from the future")
+	}
+}
+
+// futureServer is a newer server: after acknowledging a join it sends an
+// event this client does not know, then a message.
+type futureServer struct {
+	chatv1.UnimplementedChatServiceServer
+}
+
+func (futureServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, resp := range []*chatv1.ConnectResponse{
+			{Event: &chatv1.ConnectResponse_Ack{Ack: &chatv1.Ack{RequestId: req.GetRequestId()}}},
+			{}, // an event added after this client was built
+			{Event: &chatv1.ConnectResponse_Message{Message: &chatv1.Message{RoomId: "general", Text: "from the future", Seq: 1}}},
+		} {
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func TestDialRefusesPlaintextToRemoteAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		addr     string
+		insecure bool
+		wantErr  bool
+	}{
+		{addr: "localhost:50051"},
+		{addr: "LOCALHOST:50051"},
+		{addr: "127.0.0.1:50051"},
+		{addr: "127.1.2.3:50051"},
+		{addr: "[::1]:50051"},
+		{addr: "chat.example.com:50051", wantErr: true},
+		{addr: "10.0.0.7:50051", wantErr: true},
+		{addr: ":50051", wantErr: true},
+		{addr: "localhost", wantErr: true},
+		{addr: "chat.example.com:50051", insecure: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s insecure=%v", tt.addr, tt.insecure), func(t *testing.T) {
+			t.Parallel()
+
+			conn, err := client.Dial(tt.addr, client.Options{Insecure: tt.insecure})
+			if err == nil {
+				defer conn.Close()
+			}
+			if got := errors.Is(err, client.ErrPlaintext); got != tt.wantErr {
+				t.Errorf("Dial(%q, Insecure: %v) = %v, want ErrPlaintext: %v", tt.addr, tt.insecure, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRegisterAndLoginErrors(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{})
+	conn := dial(t, srv, nil)
+	if err := conn.Register(ctxFor(t), "alice", password); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if err := conn.Register(ctxFor(t), "alice", password); !errors.Is(err, client.ErrUsernameTaken) {
+		t.Errorf("Register() of a taken name = %v, want ErrUsernameTaken", err)
+	}
+	if _, err := conn.Login(ctxFor(t), "alice", "wrong password"); !errors.Is(err, client.ErrInvalidCredentials) {
+		t.Errorf("Login() with a wrong password = %v, want ErrInvalidCredentials", err)
+	}
+
+	err := conn.Register(ctxFor(t), "bob", "short")
+	var invalid *client.InvalidError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Register() with a short password = %v, want InvalidError", err)
+	}
+	if len(invalid.Fields) != 1 || !strings.HasPrefix(invalid.Fields[0], "password: ") {
+		t.Errorf("InvalidError.Fields = %q, want one violation of password", invalid.Fields)
+	}
+}
+
+// ignoreIdentity leaves out what the server generates.
+var ignoreIdentity = cmpopts.IgnoreFields(client.Message{}, "ID", "SenderID", "SentAt")
+
+type options struct {
+	// unread leaves events in the chat's own channel, so the session stalls
+	// whenever the test does not read.
+	unread  bool
+	dial    []grpc.DialOption
+	relogin func(ctx context.Context, conn *client.Conn) (string, error)
+}
+
+// user is one running chat session.
+type user struct {
+	name   string
+	chat   *client.Chat
+	events <-chan client.Event
+}
+
+// connect registers name, logs in and runs a chat session until the test
+// ends. Unless opts.unread is set, events are relayed into a buffer, so a
+// test that does not read them does not stall the session.
+func connect(t *testing.T, srv *chattest.Server, name string, opts options) *user {
+	t.Helper()
+
+	srv.Register(t, name, password)
+	conn := dial(t, srv, opts.dial)
+	tok, err := conn.Login(ctxFor(t), name, password)
+	if err != nil {
+		t.Fatalf("Login(%s) error = %v", name, err)
+	}
+	chatOpts := client.ChatOptions{MinBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
+	if opts.relogin != nil {
+		chatOpts.Relogin = func(ctx context.Context) (string, error) { return opts.relogin(ctx, conn) }
+	}
+	return start(t, name, conn.NewChat(tok.Value, chatOpts), !opts.unread)
+}
+
+func dial(t *testing.T, srv *chattest.Server, extra []grpc.DialOption) *client.Conn {
+	t.Helper()
+	conn, err := client.Dial(chattest.Target, client.Options{
+		Insecure:    true,
+		DialOptions: append(srv.DialOptions(), extra...),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	})
+	return conn
+}
+
+// start runs chat until the test ends, then closes it the graceful way.
+func start(t *testing.T, name string, chat *client.Chat, relay bool) *user {
+	t.Helper()
+
+	u := &user{name: name, chat: chat, events: chat.Events()}
+	if relay {
+		buf := make(chan client.Event, 1000)
+		go func() {
+			defer close(buf)
+			for e := range chat.Events() {
+				buf <- e
+			}
+		}()
+		u.events = buf
+	}
+
+	// Not t.Context(): it is cancelled before cleanups run, and Close is
+	// what should end Run.
+	ran := make(chan error, 1)
+	go func() { ran <- chat.Run(context.Background()) }()
+	// Registered after dial's cleanup, so it runs before the connection
+	// closes.
+	t.Cleanup(func() {
+		var drained sync.WaitGroup
+		drained.Go(func() {
+			for range u.events {
+			}
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := chat.Close(ctx); err != nil {
+			t.Errorf("Close(%s) error = %v", name, err)
+		}
+		if err := <-ran; err != nil {
+			t.Errorf("Run(%s) = %v, want nil after Close", name, err)
+		}
+		drained.Wait()
+	})
+	return u
+}
+
+func (u *user) join(t *testing.T, room string) {
+	t.Helper()
+	if err := u.chat.Join(ctxFor(t), room); err != nil {
+		t.Fatalf("Join(%s, %s) error = %v", u.name, room, err)
+	}
+}
+
+// say sends text to general, the room every test talks in.
+func (u *user) say(t *testing.T, text string) {
+	t.Helper()
+	if err := u.chat.Send(ctxFor(t), "general", text); err != nil {
+		t.Fatalf("Send(%s, %q) error = %v", u.name, text, err)
+	}
+}
+
+// next returns the next event.
+func (u *user) next(t *testing.T) client.Event {
+	t.Helper()
+	select {
+	case e, ok := <-u.events:
+		if !ok {
+			t.Fatalf("%s's events closed", u.name)
+		}
+		return e
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no event for %s within 5s", u.name)
+		return nil
+	}
+}
+
+// message returns the next Message.
+func (u *user) message(t *testing.T) client.Message {
+	t.Helper()
+	return waitFor[client.Message](t, u)
+}
+
+// messageAfter skips messages up to and including the one with text and
+// returns the next.
+func (u *user) messageAfter(t *testing.T, text string) client.Message {
+	t.Helper()
+	for {
+		if u.message(t).Text == text {
+			return u.message(t)
+		}
+	}
+}
+
+// waitFor returns the next event of type E. Connection events may be
+// skipped on the way, since a reconnect can take more than one attempt;
+// anything else is unexpected.
+func waitFor[E client.Event](t *testing.T, u *user) E {
+	t.Helper()
+	for {
+		e := u.next(t)
+		if want, ok := e.(E); ok {
+			return want
+		}
+		switch e.(type) {
+		case client.Connected, client.Disconnected:
+		default:
+			t.Fatalf("%s got %#v while waiting for a %T", u.name, e, *new(E))
+		}
+	}
+}
+
+// ctxFor bounds a call that must not hang the test.
+func ctxFor(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}

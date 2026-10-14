@@ -37,6 +37,9 @@ type Options struct {
 // Server is a running chat server. Users and the token secret survive
 // Restart, so tokens issued before it stay valid.
 type Server struct {
+	// tb is the test that started the server; failures after a restart
+	// are reported to it, since a subtest that restarted it may be over.
+	tb       testing.TB
 	tokens   *auth.Tokens
 	accounts *auth.Service
 	logger   *slog.Logger
@@ -63,17 +66,15 @@ func Start(tb testing.TB, opts Options) *Server {
 	if err != nil {
 		tb.Fatalf("NewService() error = %v", err)
 	}
-	s := &Server{tokens: tokens, accounts: accounts, logger: slog.New(slog.DiscardHandler)}
-	s.serve(tb)
+	s := &Server{tb: tb, tokens: tokens, accounts: accounts, logger: slog.New(slog.DiscardHandler)}
+	s.serve()
 	tb.Cleanup(s.Stop)
 	return s
 }
 
 // serve starts a new server on a new listener and makes it the one clients
 // dial.
-func (s *Server) serve(tb testing.TB) {
-	tb.Helper()
-
+func (s *Server) serve() {
 	srv := server.New(s.logger, s.tokens, server.Options{
 		ShutdownTimeout: time.Second,
 		PublicMethods: []string{
@@ -81,7 +82,7 @@ func (s *Server) serve(tb testing.TB) {
 			authv1.AuthService_Login_FullMethodName,
 		},
 	})
-	// Not tb.Context(): it is cancelled before cleanups run.
+	// Not a test context: it is cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	hub := chat.NewHub(s.logger)
 	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(s.accounts, s.logger))
@@ -101,7 +102,7 @@ func (s *Server) serve(tb testing.TB) {
 	s.stop = sync.OnceFunc(func() {
 		cancel()
 		if err := <-served; err != nil {
-			tb.Errorf("Serve() = %v", err)
+			s.tb.Errorf("Serve() = %v", err)
 		}
 	})
 }
@@ -117,10 +118,9 @@ func (s *Server) DialOptions() []grpc.DialOption {
 
 // Restart shuts the server down, which ends open chat streams with
 // UNAVAILABLE, and starts a new one with empty rooms.
-func (s *Server) Restart(tb testing.TB) {
-	tb.Helper()
+func (s *Server) Restart() {
 	s.Stop()
-	s.serve(tb)
+	s.serve()
 }
 
 // Stop shuts the server down and waits for it. Further calls do nothing.

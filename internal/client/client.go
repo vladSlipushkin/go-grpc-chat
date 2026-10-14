@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
+	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -73,6 +74,16 @@ func Dial(addr string, opts Options) (*Conn, error) {
 			Time:    keepaliveTime,
 			Timeout: keepaliveTimeout,
 		}),
+		// While the server is down, a new stream fails at once until gRPC
+		// connects again, so gRPC's own backoff, up to two minutes by
+		// default, would decide when a session comes back. These bounds
+		// match the session's (ADR-0010).
+		grpc.WithConnectParams(grpc.ConnectParams{Backoff: grpcbackoff.Config{
+			BaseDelay:  defaultMinBackoff,
+			Multiplier: 2,
+			Jitter:     0.5,
+			MaxDelay:   defaultMaxBackoff,
+		}}),
 	}, opts.DialOptions...)
 	cc, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
@@ -181,3 +192,10 @@ func Reason(err error) string {
 
 // errorDomain is the ErrorInfo domain of the chat API (ADR-0003).
 const errorDomain = "chat.v1"
+
+// ErrorInfo reasons of the chat API (ADR-0003), as Reason returns them.
+const (
+	ReasonTokenExpired = "TOKEN_EXPIRED"
+	ReasonSlowClient   = "SLOW_CLIENT"
+	ReasonRoomLimit    = "ROOM_LIMIT_EXCEEDED"
+)

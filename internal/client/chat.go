@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	spb "google.golang.org/genproto/googleapis/rpc/status"
@@ -28,9 +27,12 @@ var (
 	// ErrNotConnected reports a request that gave up waiting for a
 	// reconnect.
 	ErrNotConnected = errors.New("not connected")
-	// ErrConnectionLost reports a request whose stream broke before the
-	// server replied. It may or may not have been applied.
+	// ErrConnectionLost reports a message whose stream broke before the
+	// server replied. It may or may not have been delivered.
 	ErrConnectionLost = errors.New("connection lost before the server replied")
+	// ErrNoReply reports a request sent but not answered before its
+	// context ended. It may or may not have been applied.
+	ErrNoReply = errors.New("no reply from the server")
 	// ErrRoomLimit reports a join past the server's room limit.
 	ErrRoomLimit = errors.New("room limit reached")
 	// ErrNotMember reports a message sent to a room not joined.
@@ -46,7 +48,7 @@ const (
 type ChatOptions struct {
 	// Relogin is called when the access token has expired and returns a
 	// new one; the chat stays disconnected while it runs. If it is nil or
-	// fails, Run returns.
+	// fails, Run returns. It must return once ctx is done.
 	Relogin func(ctx context.Context) (string, error)
 	// MinBackoff and MaxBackoff bound the wait between reconnect attempts.
 	// Zero values mean 500 ms and 30 s.
@@ -130,26 +132,27 @@ func (c *Chat) Rooms() []string {
 }
 
 // Join joins room. While the chat is reconnecting it waits for the new
-// stream, until ctx ends.
+// stream, until ctx ends. Joins and leaves are idempotent (ADR-0003), so
+// one whose stream breaks before the reply is sent again on the next.
 func (c *Chat) Join(ctx context.Context, room string) error {
-	return c.call(ctx, joinRequest(room))
+	return c.call(ctx, joinRequest(room), true)
 }
 
-// Leave leaves room.
+// Leave leaves room. It is retried like Join.
 func (c *Chat) Leave(ctx context.Context, room string) error {
 	return c.call(ctx, &chatv1.ConnectRequest{Action: &chatv1.ConnectRequest_LeaveRoom{
 		LeaveRoom: &chatv1.LeaveRoom{RoomId: room},
-	}})
+	}}, true)
 }
 
 // Send posts text to room. The message comes back as an event like
-// everyone else's. A send that fails with ErrConnectionLost may still have
-// been delivered; it is not resent, since that could post it twice
-// (ADR-0003).
+// everyone else's. A send that fails with ErrConnectionLost or ErrNoReply
+// may still have been delivered; it is not resent, since that could post
+// it twice (ADR-0003).
 func (c *Chat) Send(ctx context.Context, room, text string) error {
 	return c.call(ctx, &chatv1.ConnectRequest{Action: &chatv1.ConnectRequest_SendMessage{
 		SendMessage: &chatv1.SendMessage{RoomId: room, Text: text},
-	}})
+	}}, false)
 }
 
 func joinRequest(room string) *chatv1.ConnectRequest {
@@ -160,7 +163,7 @@ func joinRequest(room string) *chatv1.ConnectRequest {
 
 // Run serves the session until Close is called, ctx ends or the server
 // ends it in a way a reconnect cannot fix, such as a token it rejects. It
-// closes Events when it returns.
+// closes Events when it returns. Run must be called exactly once.
 func (c *Chat) Run(ctx context.Context) error {
 	defer close(c.done)
 	defer close(c.events)
@@ -176,23 +179,25 @@ func (c *Chat) Run(ctx context.Context) error {
 	token := c.token
 	attempt := 0
 	for {
-		answered, err := c.serve(ctx, token)
 		if c.quitting() {
 			return nil
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+		answered, err := c.serve(ctx, token)
 		if answered {
 			attempt = 0
 		}
 
-		if Reason(err) == "TOKEN_EXPIRED" {
-			if !c.emit(ctx, Disconnected{Err: err}) {
-				return ctx.Err()
-			}
+		switch {
+		case c.quitting():
+			return nil
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case Reason(err) == ReasonTokenExpired:
 			if c.relogin == nil {
 				return err
+			}
+			if !c.emit(ctx, Disconnected{Err: err}) {
+				return c.ended(ctx)
 			}
 			if token, err = c.relogin(ctx); err != nil {
 				if c.quitting() {
@@ -200,21 +205,25 @@ func (c *Chat) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("log in again: %w", err)
 			}
-			continue
-		}
-		if !retryable(err) {
+		case retryable(err):
+			delay := c.backoff.delay(attempt)
+			attempt++
+			if !c.emit(ctx, Disconnected{Err: err, RetryIn: delay}) || !c.sleep(ctx, delay) {
+				return c.ended(ctx)
+			}
+		default:
 			return err
 		}
-
-		delay := c.backoff.delay(attempt)
-		attempt++
-		if !c.emit(ctx, Disconnected{Err: err, RetryIn: delay}) || !c.sleep(ctx, delay) {
-			if c.quitting() {
-				return nil
-			}
-			return ctx.Err()
-		}
 	}
+}
+
+// ended is what Run returns when a wait was cut short: nothing if Close
+// asked for it, the context's error otherwise.
+func (c *Chat) ended(ctx context.Context) error {
+	if c.quitting() {
+		return nil
+	}
+	return ctx.Err()
 }
 
 // serve runs one stream: it opens it, joins the rooms again and keeps it
@@ -234,8 +243,10 @@ func (c *Chat) serve(ctx context.Context, token string) (answered bool, err erro
 	c.stream = stream
 	c.mu.Unlock()
 
+	// Both are written by the receiver and read only after received is
+	// closed.
 	var (
-		got     atomic.Bool
+		got     bool
 		recvErr error
 	)
 	received := make(chan struct{})
@@ -252,7 +263,7 @@ func (c *Chat) serve(ctx context.Context, token string) (answered bool, err erro
 	if err == nil {
 		err = recvErr
 	}
-	return got.Load(), err
+	return got, err
 }
 
 // hold joins the rooms again on a new stream and keeps the stream until
@@ -265,7 +276,10 @@ func (c *Chat) hold(ctx context.Context, stream chatStream, received <-chan stru
 		}
 		return err
 	}
-	c.setReady(stream)
+	if !c.setReady(stream) {
+		// The stream broke right after the rejoin.
+		return nil
+	}
 	if !c.emit(ctx, Connected{Rooms: c.Rooms()}) {
 		return ctx.Err()
 	}
@@ -309,14 +323,14 @@ func (c *Chat) rejoin(ctx context.Context, stream chatStream) error {
 
 // receive reads the stream until it ends: replies go to the requests
 // waiting for them, messages to Events.
-func (c *Chat) receive(ctx context.Context, stream chatStream, got *atomic.Bool) error {
+func (c *Chat) receive(ctx context.Context, stream chatStream, got *bool) error {
 	seqs := make(seqTracker)
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
 			return err
 		}
-		got.Store(true)
+		*got = true
 		switch e := resp.GetEvent().(type) {
 		case *chatv1.ConnectResponse_Ack:
 			if req := c.resolve(e.Ack.GetRequestId(), nil); req.GetLeaveRoom() != nil {
@@ -342,14 +356,20 @@ func (c *Chat) receive(ctx context.Context, stream chatStream, got *atomic.Bool)
 	}
 }
 
-// call sends req once the chat is connected and waits for its reply.
-func (c *Chat) call(ctx context.Context, req *chatv1.ConnectRequest) error {
-	stream, err := c.awaitReady(ctx)
-	if err != nil {
-		return err
+// call sends req once the chat is connected and waits for its reply. An
+// idempotent request whose stream breaks is sent again on the next one.
+func (c *Chat) call(ctx context.Context, req *chatv1.ConnectRequest, idempotent bool) error {
+	for {
+		stream, err := c.awaitReady(ctx)
+		if err != nil {
+			return err
+		}
+		err = c.roundTrip(ctx, stream, req)
+		c.inflight.Done()
+		if !idempotent || !errors.Is(err, ErrConnectionLost) {
+			return err
+		}
 	}
-	defer c.inflight.Done()
-	return c.roundTrip(ctx, stream, req)
 }
 
 // awaitReady returns the open stream and counts the caller's request as in
@@ -393,6 +413,9 @@ func (c *Chat) roundTrip(ctx context.Context, stream chatStream, req *chatv1.Con
 	c.pending[req.GetRequestId()] = pending{req: req, reply: reply}
 	c.mu.Unlock()
 
+	// Send waits only for the stream's context, not ctx: a stream stuck on
+	// flow control holds the caller until keepalive declares the
+	// connection dead.
 	c.sendMu.Lock()
 	// A failed Send means the stream has ended; the receiver learns why
 	// from Recv and fails every pending request, this one included.
@@ -404,7 +427,7 @@ func (c *Chat) roundTrip(ctx context.Context, stream chatStream, req *chatv1.Con
 		return err
 	case <-ctx.Done():
 		// The reply, if it comes, still updates the rooms.
-		return ctx.Err()
+		return fmt.Errorf("%w: %w", ErrNoReply, ctx.Err())
 	}
 }
 
@@ -430,13 +453,18 @@ func (c *Chat) resolve(id string, err error) *chatv1.ConnectRequest {
 	return p.req
 }
 
-func (c *Chat) setReady(stream chatStream) {
+// setReady lets requests use stream and reports whether it is still open.
+func (c *Chat) setReady(stream chatStream) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.stream == stream && !c.isReady {
+	if c.stream != stream {
+		return false
+	}
+	if !c.isReady {
 		c.isReady = true
 		close(c.ready)
 	}
+	return true
 }
 
 // detach forgets stream once it has ended and fails the requests still
@@ -461,8 +489,9 @@ func (c *Chat) detach(stream chatStream) {
 // Close ends the session the way ADR-0009 asks of clients: it stops taking
 // requests, waits for the replies to those already sent, half-closes the
 // stream and waits for the server to end it. If ctx ends first, it cancels
-// the stream instead. Run returns before Close does; Run must have been
-// called.
+// the stream instead. Events must still be read meanwhile. Run returns
+// before Close does; Run must have been called. Close may be called more
+// than once.
 func (c *Chat) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closing = true
@@ -548,7 +577,7 @@ func retryable(err error) bool {
 	case codes.Unavailable, codes.Internal, codes.Unknown, codes.Canceled, codes.DeadlineExceeded, codes.Aborted:
 		return true
 	case codes.ResourceExhausted:
-		return Reason(err) == "SLOW_CLIENT"
+		return Reason(err) == ReasonSlowClient
 	default:
 		return false
 	}
@@ -559,9 +588,10 @@ func retryable(err error) bool {
 func requestError(sp *spb.Status) error {
 	err := status.ErrorProto(sp)
 	switch {
-	case Reason(err) == "ROOM_LIMIT_EXCEEDED":
+	case Reason(err) == ReasonRoomLimit:
 		return ErrRoomLimit
 	case status.Code(err) == codes.FailedPrecondition:
+		// The only precondition in the contract (ADR-0003).
 		return ErrNotMember
 	default:
 		return describe(err)

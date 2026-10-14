@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,7 +71,7 @@ func TestChatRejoinsAfterServerRestart(t *testing.T) {
 	alice.message(t)
 	bob.message(t)
 
-	srv.Restart(t)
+	srv.Restart()
 
 	for _, u := range []*user{alice, bob} {
 		d := waitFor[client.Disconnected](t, u)
@@ -78,8 +79,8 @@ func TestChatRejoinsAfterServerRestart(t *testing.T) {
 			t.Errorf("%s disconnected with %v, want UNAVAILABLE", u.name, d.Err)
 		}
 	}
-	if got := waitFor[client.Connected](t, alice); !cmp.Equal(got.Rooms, []string{"general", "random"}) {
-		t.Errorf("alice reconnected with rooms %v, want [general random]", got.Rooms)
+	if diff := cmp.Diff([]string{"general", "random"}, waitFor[client.Connected](t, alice).Rooms); diff != "" {
+		t.Errorf("rooms alice rejoined mismatch (-want +got):\n%s", diff)
 	}
 	waitFor[client.Connected](t, bob)
 
@@ -119,7 +120,7 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	for {
 		e := alice.next(t)
 		if d, ok := e.(client.Disconnected); ok {
-			if reason := client.Reason(d.Err); reason != "SLOW_CLIENT" {
+			if reason := client.Reason(d.Err); reason != client.ReasonSlowClient {
 				t.Fatalf("alice disconnected with %v, want SLOW_CLIENT", d.Err)
 			}
 			break
@@ -136,8 +137,8 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	if got >= sent {
 		t.Errorf("alice received all %d messages, want her dropped before the end", sent)
 	}
-	if c := waitFor[client.Connected](t, alice); !cmp.Equal(c.Rooms, []string{"general"}) {
-		t.Errorf("alice reconnected with rooms %v, want [general]", c.Rooms)
+	if diff := cmp.Diff([]string{"general"}, waitFor[client.Connected](t, alice).Rooms); diff != "" {
+		t.Errorf("rooms alice rejoined mismatch (-want +got):\n%s", diff)
 	}
 
 	bob.say(t, "welcome back")
@@ -161,11 +162,11 @@ func TestChatLogsInAgainAfterTokenExpiry(t *testing.T) {
 	alice.join(t, "general")
 
 	d := waitFor[client.Disconnected](t, alice)
-	if reason := client.Reason(d.Err); reason != "TOKEN_EXPIRED" || d.RetryIn != 0 {
+	if reason := client.Reason(d.Err); reason != client.ReasonTokenExpired || d.RetryIn != 0 {
 		t.Fatalf("Disconnected = %+v, want TOKEN_EXPIRED without a retry delay", d)
 	}
-	if c := waitFor[client.Connected](t, alice); !cmp.Equal(c.Rooms, []string{"general"}) {
-		t.Errorf("alice reconnected with rooms %v, want [general]", c.Rooms)
+	if diff := cmp.Diff([]string{"general"}, waitFor[client.Connected](t, alice).Rooms); diff != "" {
+		t.Errorf("rooms alice rejoined mismatch (-want +got):\n%s", diff)
 	}
 	if n := logins.Load(); n != 1 {
 		t.Errorf("Relogin called %d times, want 1", n)
@@ -268,32 +269,7 @@ func TestChatEndsOnRejectedToken(t *testing.T) {
 func TestChatIgnoresUnknownEvents(t *testing.T) {
 	t.Parallel()
 
-	lis := bufconn.Listen(1 << 20)
-	gs := grpc.NewServer()
-	chatv1.RegisterChatServiceServer(gs, futureServer{})
-	served := make(chan error, 1)
-	go func() { served <- gs.Serve(lis) }()
-	t.Cleanup(func() {
-		gs.Stop()
-		if err := <-served; err != nil {
-			t.Errorf("Serve() = %v", err)
-		}
-	})
-
-	conn, err := client.Dial("passthrough:///future", client.Options{
-		Insecure: true,
-		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return lis.DialContext(ctx)
-		})},
-	})
-	if err != nil {
-		t.Fatalf("Dial() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := conn.Close(); err != nil {
-			t.Errorf("close connection: %v", err)
-		}
-	})
+	conn := startFake(t, futureServer{})
 	u := start(t, "alice", conn.NewChat("token", client.ChatOptions{}), true)
 	u.join(t, "general")
 	// The unknown event produces nothing; the message comes next.
@@ -320,7 +296,7 @@ func (futureServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 		for _, resp := range []*chatv1.ConnectResponse{
 			{Event: &chatv1.ConnectResponse_Ack{Ack: &chatv1.Ack{RequestId: req.GetRequestId()}}},
 			{}, // an event added after this client was built
-			{Event: &chatv1.ConnectResponse_Message{Message: &chatv1.Message{RoomId: "general", Text: "from the future", Seq: 1}}},
+			{Event: &chatv1.ConnectResponse_Message{Message: &chatv1.Message{RoomId: "general", Text: "from the future"}}},
 		} {
 			if err := stream.Send(resp); err != nil {
 				return err
@@ -329,6 +305,164 @@ func (futureServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	}
 }
 
+func TestChatResendsJoinButNotSend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		request func(context.Context, *client.Chat) error
+		wantErr error
+		want    []string // what the server received, stream by stream
+	}{
+		{
+			name:    "join",
+			request: func(ctx context.Context, c *client.Chat) error { return c.Join(ctx, "general") },
+			want:    []string{"1: join general", "2: join general"},
+		},
+		{
+			name:    "send",
+			request: func(ctx context.Context, c *client.Chat) error { return c.Send(ctx, "general", "hi") },
+			wantErr: client.ErrConnectionLost,
+			want:    []string{"1: send hi"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := &breakingServer{}
+			conn := startFake(t, srv)
+			chat := conn.NewChat("token", client.ChatOptions{MinBackoff: time.Millisecond, MaxBackoff: 10 * time.Millisecond})
+			u := start(t, "alice", chat, true)
+
+			if err := tt.request(ctxFor(t), u.chat); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("request = %v, want %v", err, tt.wantErr)
+			}
+			if diff := cmp.Diff(tt.want, srv.received()); diff != "" {
+				t.Errorf("requests the server received mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// breakingServer ends the first stream on its first request without
+// replying, as a server that goes down at that moment would, and
+// acknowledges everything on later streams.
+type breakingServer struct {
+	chatv1.UnimplementedChatServiceServer
+
+	mu      sync.Mutex
+	streams int
+	log     []string
+}
+
+func (s *breakingServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	s.mu.Lock()
+	s.streams++
+	n := s.streams
+	s.mu.Unlock()
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		s.record(n, req)
+		if n == 1 {
+			return status.Error(codes.Unavailable, "going down")
+		}
+		if err := stream.Send(&chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Ack{
+			Ack: &chatv1.Ack{RequestId: req.GetRequestId()},
+		}}); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *breakingServer) record(stream int, req *chatv1.ConnectRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var what string
+	switch a := req.GetAction().(type) {
+	case *chatv1.ConnectRequest_JoinRoom:
+		what = "join " + a.JoinRoom.GetRoomId()
+	case *chatv1.ConnectRequest_SendMessage:
+		what = "send " + a.SendMessage.GetText()
+	}
+	s.log = append(s.log, fmt.Sprintf("%d: %s", stream, what))
+}
+
+func (s *breakingServer) received() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.log)
+}
+
+func TestChatRequestWithoutReply(t *testing.T) {
+	t.Parallel()
+
+	conn := startFake(t, silentServer{})
+	u := start(t, "alice", conn.NewChat("token", client.ChatOptions{}), true)
+	waitFor[client.Connected](t, u)
+
+	// Nothing will answer: the timeout only ends the wait.
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if err := u.chat.Send(ctx, "general", "hello?"); !errors.Is(err, client.ErrNoReply) {
+		t.Errorf("Send() without a reply = %v, want ErrNoReply", err)
+	}
+}
+
+// silentServer reads requests and never answers them.
+type silentServer struct {
+	chatv1.UnimplementedChatServiceServer
+}
+
+func (silentServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	for {
+		if _, err := stream.Recv(); errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
+}
+
+// startFake serves impl, a chat service written for the test, and returns
+// a connection to it.
+func startFake(t *testing.T, impl chatv1.ChatServiceServer) *client.Conn {
+	t.Helper()
+
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer()
+	chatv1.RegisterChatServiceServer(gs, impl)
+	served := make(chan error, 1)
+	go func() { served <- gs.Serve(lis) }()
+	t.Cleanup(func() {
+		gs.Stop()
+		if err := <-served; err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	})
+
+	conn, err := client.Dial("passthrough:///fake", client.Options{
+		Insecure: true,
+		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		})},
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	})
+	return conn
+}
 func TestDialRefusesPlaintextToRemoteAddress(t *testing.T) {
 	t.Parallel()
 

@@ -47,7 +47,7 @@ func TestEndedMapsCauseToStatus(t *testing.T) {
 				end(tt.cause)
 			}
 
-			got := newTestChatServer().ended(ctx, streamCtx)
+			got := ended(ctx, streamCtx, discard)
 			if diff := cmp.Diff(status.Convert(tt.want).Proto(), status.Convert(got).Proto(), protocmp.Transform()); diff != "" {
 				t.Errorf("ended() with cause %v mismatch (-want +got):\n%s", tt.cause, diff)
 			}
@@ -90,7 +90,7 @@ func TestEndedKeepsFirstCause(t *testing.T) {
 					end(chat.ErrSlowClient)
 				}
 
-				if got := status.Code(newTestChatServer().ended(ctx, streamCtx)); got != tt.wantCode {
+				if got := status.Code(ended(ctx, streamCtx, discard)); got != tt.wantCode {
 					t.Errorf("ended() code = %v, want %v", got, tt.wantCode)
 				}
 			})
@@ -98,6 +98,4 @@ func TestEndedKeepsFirstCause(t *testing.T) {
 	}
 }
 
-func newTestChatServer() *ChatServer {
-	return NewChatServer(nil, nil, slog.New(slog.DiscardHandler))
-}
+var discard = slog.New(slog.DiscardHandler)

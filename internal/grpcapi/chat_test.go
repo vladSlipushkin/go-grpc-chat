@@ -2,6 +2,7 @@ package grpcapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -230,6 +231,39 @@ func TestChatShutdownEndsStreamsWithUnavailable(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve() did not return after the chat stream ended")
+	}
+}
+
+func TestChatSessionLogNamesUserAndPeer(t *testing.T) {
+	t.Parallel()
+
+	env := startChat(t, time.Minute)
+	alice := env.connect(t, "alice", time.Hour)
+	wantAck(t, alice, joinRoom("a1", "general"))
+	// Serve returns after the handler, so its records are written by then.
+	if err := env.stop(); err != nil {
+		t.Fatalf("Serve() = %v", err)
+	}
+
+	type record struct {
+		Msg    string `json:"msg"`
+		UserID string `json:"user_id"`
+		Peer   string `json:"peer"`
+	}
+	var got []record
+	dec := json.NewDecoder(strings.NewReader(env.logs.String()))
+	for dec.More() {
+		var r record
+		if err := dec.Decode(&r); err != nil {
+			t.Fatalf("decode log record: %v", err)
+		}
+		if r.Msg == "chat session ended" {
+			got = append(got, r)
+		}
+	}
+	want := []record{{Msg: "chat session ended", UserID: "id-alice", Peer: "bufconn"}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("session end records mismatch (-want +got):\n%s", diff)
 	}
 }
 

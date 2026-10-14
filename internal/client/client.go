@@ -78,12 +78,17 @@ func Dial(addr string, opts Options) (*Conn, error) {
 		// connects again, so gRPC's own backoff, up to two minutes by
 		// default, would decide when a session comes back. These bounds
 		// match the session's (ADR-0010).
-		grpc.WithConnectParams(grpc.ConnectParams{Backoff: grpcbackoff.Config{
-			BaseDelay:  defaultMinBackoff,
-			Multiplier: 2,
-			Jitter:     0.5,
-			MaxDelay:   defaultMaxBackoff,
-		}}),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: grpcbackoff.Config{
+				BaseDelay:  defaultMinBackoff,
+				Multiplier: 2,
+				Jitter:     0.5,
+				MaxDelay:   defaultMaxBackoff,
+			},
+			// gRPC's default; without it an attempt would get only the
+			// backoff delay, 500 ms at first, to connect.
+			MinConnectTimeout: 20 * time.Second,
+		}),
 	}, opts.DialOptions...)
 	cc, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {

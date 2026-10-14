@@ -482,6 +482,11 @@ func (c *Chat) detach(stream chatStream) {
 	}
 	for id, p := range c.pending {
 		delete(c.pending, id)
+		// A leave about to be resent must not be undone by the rejoin in
+		// the meantime.
+		if leave := p.req.GetLeaveRoom(); leave != nil {
+			delete(c.rooms, leave.GetRoomId())
+		}
 		p.reply <- ErrConnectionLost
 	}
 }

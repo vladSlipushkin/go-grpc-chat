@@ -305,7 +305,7 @@ func (futureServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	}
 }
 
-func TestChatResendsJoinButNotSend(t *testing.T) {
+func TestChatResendsJoinAndLeaveButNotSend(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -318,6 +318,11 @@ func TestChatResendsJoinButNotSend(t *testing.T) {
 			name:    "join",
 			request: func(ctx context.Context, c *client.Chat) error { return c.Join(ctx, "general") },
 			want:    []string{"1: join general", "2: join general"},
+		},
+		{
+			name:    "leave",
+			request: func(ctx context.Context, c *client.Chat) error { return c.Leave(ctx, "general") },
+			want:    []string{"1: leave general", "2: leave general"},
 		},
 		{
 			name:    "send",
@@ -388,6 +393,8 @@ func (s *breakingServer) record(stream int, req *chatv1.ConnectRequest) {
 	switch a := req.GetAction().(type) {
 	case *chatv1.ConnectRequest_JoinRoom:
 		what = "join " + a.JoinRoom.GetRoomId()
+	case *chatv1.ConnectRequest_LeaveRoom:
+		what = "leave " + a.LeaveRoom.GetRoomId()
 	case *chatv1.ConnectRequest_SendMessage:
 		what = "send " + a.SendMessage.GetText()
 	}

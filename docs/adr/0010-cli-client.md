@@ -66,8 +66,10 @@ goroutine that reads it until it ends.
   their context ends (10 seconds in the CLI) instead of failing at once.
 - Joins and leaves are idempotent (ADR-0003), so one whose stream breaks
   before the reply is sent again on the next stream, after the rejoin, and
-  returns once that one is answered. A lost leave therefore cannot be undone
-  by the rejoin, and a lost join is not silently dropped.
+  returns once that one is answered, unless its context ends or the session
+  closes first. A lost leave also takes its room off the rejoin list at
+  once, so the rejoin does not return to it; a lost join is not silently
+  dropped.
 - A send whose stream breaks before the reply fails with
   `ErrConnectionLost`, and one whose context ends first fails with
   `ErrNoReply`. Neither is retried: the message may have been delivered, and
@@ -147,10 +149,12 @@ the stream and wait for the server to end it with `OK`. The whole sequence is
 bounded at 5 seconds, after which the stream is cancelled. A second Ctrl+C
 ends the process at once.
 
-Ctrl+C does not cancel a request already sent: the server applies it before
-it sees the half-close, so the screen would claim "not sent" about a message
-the room delivered. A request is bounded by its own 10-second timeout
-instead.
+Ctrl+C does not cancel the request in progress, so that the session closes
+only after its reply, as ADR-0009 asks: a message the server applies before
+it sees the half-close must not be reported as lost. The request is bounded
+by its own 10-second timeout instead, which includes waiting for a reconnect
+while the server is down. Ctrl+C can therefore take up to 10 seconds plus
+the 5 of closing; a second Ctrl+C ends the process at once.
 
 ### Keepalive
 
@@ -185,7 +189,7 @@ and `-tls` with a CA file on the client.
   `Close` waiting for every reply; a room's `seq` starting over without a
   false gap; a rejected token ending the session. Hand-written servers
   cover what the real one does not do on demand: a stream that breaks
-  before replying (the join is sent again, the send is not), a request
+  before replying (a join or leave is sent again, a send is not), a request
   never answered, and events from a newer server. The CLI is tested as whole
-  terminal sessions, including the re-login prompt. `docs/manual-testing.md` describes the same checks by
-  hand.
+  terminal sessions, including the re-login prompt. `docs/manual-testing.md`
+  describes the same checks by hand.

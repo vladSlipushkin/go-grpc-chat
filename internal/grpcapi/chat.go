@@ -11,10 +11,12 @@ import (
 	"buf.build/go/protovalidate"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chat"
 )
 
@@ -66,33 +68,35 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	ctx, end := context.WithCancelCause(stream.Context())
 	defer end(nil)
 
+	logger := streamLogger(ctx, s.logger)
+
 	sess, err := s.hub.Connect(ctx, end)
 	if err != nil {
-		return s.connectFailed(ctx, err)
+		return connectFailed(ctx, logger, err)
 	}
 	defer sess.Close()
 
 	reqs := make(chan *chatv1.ConnectRequest)
 	// Buffered so that the reader never blocks on reporting its last error.
 	recvErr := make(chan error, 1)
-	go s.read(ctx, end, stream, reqs, recvErr)
-	go s.write(ctx, end, stream, sess.Events())
+	go read(ctx, logger, end, stream, reqs, recvErr)
+	go write(ctx, logger, end, stream, sess.Events())
 
 	for {
 		select {
 		case <-ctx.Done():
-			return s.ended(ctx, stream.Context())
+			return ended(ctx, stream.Context(), logger)
 		case <-s.shutdown:
 			end(errServerStopping)
-			return s.ended(ctx, stream.Context())
+			return ended(ctx, stream.Context(), logger)
 		case err := <-recvErr:
 			if errors.Is(err, io.EOF) {
 				// A session that had already ended keeps its cause.
 				if ctx.Err() != nil {
-					return s.ended(ctx, stream.Context())
+					return ended(ctx, stream.Context(), logger)
 				}
-				// Half-close ends the session at once; replies still
-				// queued are dropped (ADR-0009).
+				// Half-close ends the session at once; replies not yet
+				// sent may be lost (ADR-0009).
 				return nil
 			}
 			// RecvMsg has already ended the stream with this status.
@@ -105,9 +109,9 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 				end(errServerStopping)
 			}
 			if ctx.Err() != nil {
-				return s.ended(ctx, stream.Context())
+				return ended(ctx, stream.Context(), logger)
 			}
-			s.apply(ctx, end, sess, req)
+			apply(ctx, logger, end, sess, req)
 		}
 	}
 }
@@ -122,20 +126,34 @@ func (s *ChatServer) stopping() bool {
 	}
 }
 
-func (s *ChatServer) connectFailed(ctx context.Context, err error) error {
+// streamLogger returns a logger that tags records with the caller's user id
+// and address, as the logging interceptor tags the call's final record, so
+// a stream's records can be matched with its outcome.
+func streamLogger(ctx context.Context, logger *slog.Logger) *slog.Logger {
+	var attrs []any
+	if claims, ok := auth.FromContext(ctx); ok {
+		attrs = append(attrs, slog.String("user_id", claims.UserID))
+	}
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		attrs = append(attrs, slog.String("peer", p.Addr.String()))
+	}
+	return logger.With(attrs...)
+}
+
+func connectFailed(ctx context.Context, logger *slog.Logger, err error) error {
 	if errors.Is(err, chat.ErrHubClosed) {
 		return errShuttingDown
 	}
 	// ErrNoUser: the auth interceptor did not run for this method.
-	s.logger.ErrorContext(ctx, "open chat session", slog.Any("error", err))
+	logger.ErrorContext(ctx, "open chat session", slog.Any("error", err))
 	return errInternal
 }
 
 // read hands requests over to the handler. It stops after the first Recv
 // error, which it reports on errc, or once ctx ends; a Recv blocked when the
 // handler returns is released by gRPC closing the stream.
-func (s *ChatServer) read(ctx context.Context, end context.CancelCauseFunc, stream chatv1.ChatService_ConnectServer, reqs chan<- *chatv1.ConnectRequest, errc chan<- error) {
-	defer s.recoverPanic(ctx, end, "reader")
+func read(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, stream chatv1.ChatService_ConnectServer, reqs chan<- *chatv1.ConnectRequest, errc chan<- error) {
+	defer recoverPanic(ctx, logger, end, "reader")
 	for {
 		req, err := stream.Recv()
 		if err != nil {
@@ -152,8 +170,8 @@ func (s *ChatServer) read(ctx context.Context, end context.CancelCauseFunc, stre
 
 // write sends the session's events. It is the only goroutine that calls
 // Send on the stream, as gRPC requires.
-func (s *ChatServer) write(ctx context.Context, end context.CancelCauseFunc, stream chatv1.ChatService_ConnectServer, events <-chan chat.Event) {
-	defer s.recoverPanic(ctx, end, "writer")
+func write(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, stream chatv1.ChatService_ConnectServer, events <-chan chat.Event) {
+	defer recoverPanic(ctx, logger, end, "writer")
 	for {
 		select {
 		case <-ctx.Done():
@@ -178,9 +196,9 @@ func (s *ChatServer) write(ctx context.Context, end context.CancelCauseFunc, str
 // recoverPanic keeps a panic in the reader or the writer from taking the
 // process down: the interceptor's recover only covers the handler's own
 // goroutine. The session ends and the stream with INTERNAL.
-func (s *ChatServer) recoverPanic(ctx context.Context, end context.CancelCauseFunc, goroutine string) {
+func recoverPanic(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, goroutine string) {
 	if r := recover(); r != nil {
-		s.logger.ErrorContext(ctx, "chat stream goroutine panicked",
+		logger.ErrorContext(ctx, "chat stream goroutine panicked",
 			slog.String("goroutine", goroutine),
 			slog.Any("panic", r),
 			slog.String("stack", string(debug.Stack())),
@@ -191,9 +209,9 @@ func (s *ChatServer) recoverPanic(ctx context.Context, end context.CancelCauseFu
 
 // apply runs one request and queues its Ack or Error. Errors that concern
 // the whole connection end the session instead.
-func (s *ChatServer) apply(ctx context.Context, end context.CancelCauseFunc, sess *chat.Session, req *chatv1.ConnectRequest) {
+func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc, sess *chat.Session, req *chatv1.ConnectRequest) {
 	if err := protovalidate.Validate(req); err != nil {
-		sess.Enqueue(s.invalid(ctx, req, err))
+		sess.Enqueue(invalid(ctx, logger, req, err))
 		return
 	}
 
@@ -232,11 +250,11 @@ func (s *ChatServer) apply(ctx context.Context, end context.CancelCauseFunc, ses
 
 // invalid builds the Error for a request that fails validation. The
 // request id is echoed only if it is itself valid.
-func (s *ChatServer) invalid(ctx context.Context, req *chatv1.ConnectRequest, err error) chat.Rejection {
+func invalid(ctx context.Context, logger *slog.Logger, req *chatv1.ConnectRequest, err error) chat.Rejection {
 	var verr *protovalidate.ValidationError
 	if !errors.As(err, &verr) {
 		// The rules failed to compile or evaluate: a bug in the contract.
-		s.logger.ErrorContext(ctx, "request validation failed", slog.Any("error", err))
+		logger.ErrorContext(ctx, "request validation failed", slog.Any("error", err))
 		return chat.Rejection{RequestID: req.GetRequestId(), Err: errInternal}
 	}
 	id := req.GetRequestId()
@@ -252,9 +270,9 @@ func (s *ChatServer) invalid(ctx context.Context, req *chatv1.ConnectRequest, er
 // ended returns the status a stream ends with once its session's context
 // has ended. The first cause wins (ADR-0008), so a session dropped as slow
 // just before its token expired still reports SLOW_CLIENT.
-func (s *ChatServer) ended(ctx, streamCtx context.Context) error {
+func ended(ctx, streamCtx context.Context, logger *slog.Logger) error {
 	cause := context.Cause(ctx)
-	s.logger.InfoContext(ctx, "chat session ended", slog.Any("cause", cause))
+	logger.InfoContext(ctx, "chat session ended", slog.Any("cause", cause))
 	switch {
 	case errors.Is(cause, chat.ErrSlowClient):
 		return errSlowClient
@@ -269,7 +287,7 @@ func (s *ChatServer) ended(ctx, streamCtx context.Context) error {
 		// last into TOKEN_EXPIRED.
 		return status.FromContextError(ctx.Err()).Err()
 	default:
-		s.logger.ErrorContext(ctx, "chat session failed", slog.Any("error", cause))
+		logger.ErrorContext(ctx, "chat session failed", slog.Any("error", cause))
 		return errInternal
 	}
 }

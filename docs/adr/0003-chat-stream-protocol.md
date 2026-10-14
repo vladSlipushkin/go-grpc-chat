@@ -64,7 +64,11 @@ Non-goals for v1, each addable later without breaking the contract:
 - member lists and join/leave presence events;
 - room management: creating, listing, deleting rooms, permissions;
 - editing and deleting messages;
-- refresh tokens and token revocation.
+- refresh tokens and token revocation;
+- a web client. Browsers cannot hold a bidirectional gRPC stream, neither
+  natively nor through gRPC-Web or Connect, which support only unary and
+  server streaming there. A web client would need a gateway of its own,
+  such as WebSocket to gRPC.
 
 ### Processing model
 
@@ -80,9 +84,10 @@ Non-goals for v1, each addable later without breaking the contract:
   - the sender's own `Message` may arrive before or after the `Ack` for
     sending it;
   - nothing from a room arrives after the `Ack` for leaving it.
-- A client that half-closes its side ends the stream: the server ends it
-  with `OK` at once and drops replies it has not sent yet, so a client that
-  needs them waits for them before closing (ADR-0009).
+- A client that half-closes its side ends the stream: the server applies
+  the requests sent before it and ends the stream with `OK` at once. Replies
+  not yet sent by then may be lost, so a client that needs them waits for
+  them before closing (ADR-0009).
 - Requests are validated in the handler, not by a protovalidate stream
   interceptor. An interceptor reports a violation as a `RecvMsg` error, so the
   handler would have to tell it apart from transport errors by code and then

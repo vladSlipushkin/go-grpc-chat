@@ -222,7 +222,7 @@ client.
   at-most-once delivery, an explicit disconnect is the only signal that it
   missed something.
 - 64 absorbs short bursts in a busy room for a client on a normal network,
-  while bounding queued message text at 256 KiB per connection (64 Г— 4 KiB,
+  while bounding queued message text at 256 KiB per connection (64 × 4 KiB,
   the byte limit on message text). Envelope fields and gRPC and HTTP/2
   buffers behind the writer come on top. It is a starting point to revisit
   with metrics.

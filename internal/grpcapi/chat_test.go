@@ -414,19 +414,16 @@ func TestWriterSendsNothingAfterSessionEnds(t *testing.T) {
 }
 
 // flood posts n messages of 4 KiB to general. One stream may not post that
-// fast (ADR-0008), so each sender joins for one burst and leaves.
+// fast (ADR-0008), so each sender joins for one burst. It leaves after its
+// burst: it stops reading then, and staying would get it dropped as slow.
 func flood(t *testing.T, env chatEnv, n int) {
 	t.Helper()
-	for i := 0; i < n; {
-		sender := env.connect(t, fmt.Sprintf("sender-%d", i), time.Hour)
+	for start := 0; start < n; start += grpcapi.MessageBurst {
+		sender := env.connect(t, fmt.Sprintf("sender-%d", start), time.Hour)
 		wantAck(t, sender, joinRoom("join", "general"))
-		for range grpcapi.MessageBurst {
-			if i == n {
-				break
-			}
+		for i := start; i < min(start+grpcapi.MessageBurst, n); i++ {
 			text := fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000))
 			wantAck(t, sender, sendMessage(fmt.Sprintf("m-%d", i), "general", text))
-			i++
 		}
 		wantAck(t, sender, leaveRoom("leave", "general"))
 	}
@@ -445,15 +442,33 @@ func TestChatRateLimitsMessages(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(auth.NewContext(t.Context(), auth.Claims{UserID: "id-alice", Username: "alice"}))
 		defer cancel()
-		stream := newPipeStream(ctx)
-		done := make(chan error, 1)
-		go func() { done <- srv.Connect(stream) }()
+		stream := connectPipe(ctx, srv)
 
 		if got := stream.request(t, joinRoom("j", "general")); got.GetAck() == nil {
 			t.Fatalf("reply to join = %v, want an Ack", got)
 		}
-		// Invalid messages are rejected before the limiter and cost nothing.
-		stream.request(t, sendMessage("blank", "general", " "))
+		// Messages that are not posted cost nothing: an invalid one is
+		// rejected before the limiter, one to a room not joined gives its
+		// token back.
+		rejected := []struct {
+			req  *chatv1.ConnectRequest
+			want reply
+		}{
+			{
+				req:  sendMessage("blank", "general", " "),
+				want: reply{requestID: "blank", code: codes.InvalidArgument, fields: []string{"send_message.text"}},
+			},
+			{
+				req:  sendMessage("elsewhere", "random", "hi"),
+				want: reply{requestID: "elsewhere", code: codes.FailedPrecondition},
+			},
+		}
+		for _, r := range rejected {
+			got := stream.request(t, r.req)
+			if diff := cmp.Diff(r.want, summarize(t, got), cmp.AllowUnexported(reply{})); diff != "" {
+				t.Errorf("reply to %v mismatch (-want +got):\n%s", r.req, diff)
+			}
+		}
 		for i := range grpcapi.MessageBurst {
 			if got := stream.request(t, sendMessage(fmt.Sprint(i), "general", "hi")); got.GetAck() == nil {
 				t.Fatalf("reply to message %d of the burst = %v, want an Ack", i, got)
@@ -474,12 +489,14 @@ func TestChatRateLimitsMessages(t *testing.T) {
 		if got := stream.request(t, sendMessage("later", "general", "hi")); got.GetAck() == nil {
 			t.Errorf("reply after waiting = %v, want an Ack: the stream stays open", got)
 		}
-		if got := stream.request(t, sendMessage("again", "general", "hi")); got.GetError() == nil {
-			t.Errorf("reply to a second message without waiting = %v, want an Error", got)
+		got = stream.request(t, sendMessage("again", "general", "hi"))
+		want = reply{requestID: "again", code: codes.ResourceExhausted, reason: "RATE_LIMITED"}
+		if diff := cmp.Diff(want, summarize(t, got), cmp.AllowUnexported(reply{})); diff != "" {
+			t.Errorf("reply to a second message without waiting mismatch (-want +got):\n%s", diff)
 		}
 
 		cancel()
-		assertStatus(t, <-done, codes.Canceled, "")
+		assertStatus(t, <-stream.done, codes.Canceled, "")
 	})
 }
 
@@ -487,14 +504,17 @@ func TestChatRateLimitsMessages(t *testing.T) {
 // synctest bubble.
 type pipeStream struct {
 	*fakeStream
-	in  chan *chatv1.ConnectRequest
-	out chan *chatv1.ConnectResponse
+	in   chan *chatv1.ConnectRequest
+	out  chan *chatv1.ConnectResponse
+	done chan error // what Connect returned
 }
 
-func newPipeStream(ctx context.Context) *pipeStream {
+// connectPipe runs srv.Connect on a pipeStream until ctx ends.
+func connectPipe(ctx context.Context, srv *grpcapi.ChatServer) *pipeStream {
 	s := &pipeStream{
-		in:  make(chan *chatv1.ConnectRequest),
-		out: make(chan *chatv1.ConnectResponse, 256),
+		in:   make(chan *chatv1.ConnectRequest),
+		out:  make(chan *chatv1.ConnectResponse, 256),
+		done: make(chan error, 1),
 	}
 	s.fakeStream = &fakeStream{
 		ctx: ctx,
@@ -503,7 +523,8 @@ func newPipeStream(ctx context.Context) *pipeStream {
 			case req := <-s.in:
 				return req, nil
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				// RecvMsg reports a cancelled stream as a status.
+				return nil, status.FromContextError(ctx.Err()).Err()
 			}
 		},
 		send: func(resp *chatv1.ConnectResponse) error {
@@ -511,6 +532,7 @@ func newPipeStream(ctx context.Context) *pipeStream {
 			return nil
 		},
 	}
+	go func() { s.done <- srv.Connect(s) }() //nolint:contextcheck // the stream carries ctx
 	return s
 }
 
@@ -518,7 +540,11 @@ func newPipeStream(ctx context.Context) *pipeStream {
 // skipping messages.
 func (s *pipeStream) request(t *testing.T, req *chatv1.ConnectRequest) *chatv1.ConnectResponse {
 	t.Helper()
-	s.in <- req
+	select {
+	case s.in <- req:
+	case err := <-s.done:
+		t.Fatalf("Connect() = %v before %v", err, req)
+	}
 	synctest.Wait()
 	for {
 		select {

@@ -111,17 +111,15 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	alice.join(t, "general")
 	bob.join(t, "general")
 
-	// One stream may not post this fast (ADR-0008): each sender joins for a
-	// handful of messages, well within the server's burst, and leaves.
+	// One stream may not post this fast (ADR-0008): each sender posts a
+	// handful of messages, well within the server's burst. Their events are
+	// relayed into buffers, so they keep up with the room.
 	const sent, perSender = 200, 5
-	for i := 0; i < sent; i += perSender {
-		sender := connect(t, srv, fmt.Sprintf("sender-%d", i), options{})
+	for start := 0; start < sent; start += perSender {
+		sender := connect(t, srv, fmt.Sprintf("sender-%d", start), options{})
 		sender.join(t, "general")
-		for j := range perSender {
-			sender.say(t, fmt.Sprintf("%03d%s", i+j, strings.Repeat("x", 4000)))
-		}
-		if err := sender.chat.Leave(ctxFor(t), "general"); err != nil {
-			t.Fatalf("Leave(%s) error = %v", sender.name, err)
+		for i := start; i < start+perSender; i++ {
+			sender.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
 		}
 	}
 
@@ -191,7 +189,8 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 	alice.join(t, "general")
 	bob.join(t, "general")
 
-	const sends = 20
+	// Within the server's burst (ADR-0008), so every reply is an Ack.
+	const sends = 10
 	ctx := ctxFor(t)
 	results := make(chan error, sends)
 	for i := range sends {
@@ -211,8 +210,6 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 			acked++
 		case errors.Is(err, client.ErrClosed):
 			// Refused before it was sent.
-		case errors.Is(err, client.ErrRateLimited):
-			// Answered, but past the server's burst and not posted.
 		default:
 			t.Errorf("Send() = %v, want nil or ErrClosed: Close must not cut a request short", err)
 		}
@@ -246,6 +243,17 @@ func TestChatSendingTooFastKeepsStreamOpen(t *testing.T) {
 		t.Fatalf("Send() past the server's burst = %v, want ErrRateLimited", err)
 	}
 	alice.join(t, "random")
+	// Everything relayed so far is in the buffer: no reconnect happened.
+	for {
+		select {
+		case e := <-alice.events:
+			if d, ok := e.(client.Disconnected); ok {
+				t.Fatalf("stream ended after RATE_LIMITED: %v", d.Err)
+			}
+		default:
+			return
+		}
+	}
 }
 
 func TestChatSeqRestartIsNotAGap(t *testing.T) {

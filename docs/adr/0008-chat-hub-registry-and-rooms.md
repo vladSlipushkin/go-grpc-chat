@@ -153,24 +153,28 @@ The stream handler therefore limits each stream to five messages a second
 on average and ten at once, with a token bucket (`golang.org/x/time/rate`).
 A message over the limit is rejected in the stream like any request error:
 `RESOURCE_EXHAUSTED` with reason `RATE_LIMITED` and a `google.rpc.RetryInfo`
-saying when the next token is free. The stream stays open, and the rejected
-message does not use up the next token. Messages are checked against the
-contract first, so invalid ones cost nothing.
+saying when the next token is free. The stream stays open. Only messages
+actually posted use up a token: an invalid one is rejected before the
+limiter, and one refused by the limiter or sent to a room not joined gives
+its reservation back.
 
 - Five a second is far above anyone typing, and a burst of ten lets a
   pasted block of lines through. One stream then adds at most ten messages
   at once and five a second to a member's queue of 64; a member that keeps
-  reading drains that long before it fills, so a sender alone can no
+  reading drains that long before it fills, so one stream alone can no
   longer get members dropped.
 - The limit lives in the handler, next to validation, rather than in the
-  hub: it is a property of the connection, like the session's queue, and
-  the room's goroutine stays free of per-sender state.
+  hub: it belongs to the stream, like the session's queue, and the room's
+  goroutine stays free of per-sender state.
 - Joins and leaves are not limited. They post nothing to other members,
   and each one waits for its room.
+- The client is told how long to wait, but the CLI only asks the user to
+  slow down: a person reads "wait a moment" faster than a delay in
+  milliseconds.
 
 The limit is per stream, not per user. A client with several streams, up
-to 100 on one connection (ADR-0006) and any number of connections, gets
-the allowance of each. A per-user limit needs state shared by the user's
+to 100 on one HTTP/2 connection (ADR-0006) and any number of HTTP/2
+connections, gets the allowance of each. A per-user limit needs state shared by the user's
 streams, kept in the hub and cleaned up when the last stream ends. Until
 then this remainder is an accepted risk, bounded in practice by the
 connection limit the ingress sets in front of the server.

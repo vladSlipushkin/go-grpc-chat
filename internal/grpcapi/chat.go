@@ -95,8 +95,8 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 				if ctx.Err() != nil {
 					return ended(ctx, stream.Context(), logger)
 				}
-				// Half-close ends the session at once; replies still
-				// queued are dropped (ADR-0009).
+				// Half-close ends the session at once; replies not yet
+				// sent may be lost (ADR-0009).
 				return nil
 			}
 			// RecvMsg has already ended the stream with this status.

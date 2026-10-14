@@ -178,18 +178,15 @@ func TestChatSlowClientIsDroppedWithoutGap(t *testing.T) {
 		grpc.WithInitialWindowSize(64<<10),
 		grpc.WithInitialConnWindowSize(64<<10),
 	)
-	bob := env.connect(t, "bob", time.Hour)
 	wantAck(t, alice, joinRoom("a1", "general"))
-	wantAck(t, bob, joinRoom("b1", "general"))
 
 	// Alice stops reading. 200 messages of 4 KiB are far more than her
 	// queue, her window and the server's write buffer hold together.
 	const sent = 200
-	for i := range sent {
-		text := fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000))
-		wantAck(t, bob, sendMessage(fmt.Sprintf("b-%d", i), "general", text))
-	}
+	flood(t, env, sent)
 	// The room keeps serving the others after dropping alice.
+	bob := env.connect(t, "bob", time.Hour)
+	wantAck(t, bob, joinRoom("b1", "general"))
 	wantAck(t, bob, sendMessage("b-last", "general", "still here"))
 
 	var got int64
@@ -414,6 +411,137 @@ func TestWriterSendsNothingAfterSessionEnds(t *testing.T) {
 			t.Errorf("writer sent %d events, want only the Ack it was sending when the session ended", len(sent))
 		}
 	})
+}
+
+// flood posts n messages of 4 KiB to general. One stream may not post that
+// fast (ADR-0008), so each sender joins for one burst and leaves.
+func flood(t *testing.T, env chatEnv, n int) {
+	t.Helper()
+	for i := 0; i < n; {
+		sender := env.connect(t, fmt.Sprintf("sender-%d", i), time.Hour)
+		wantAck(t, sender, joinRoom("join", "general"))
+		for range grpcapi.MessageBurst {
+			if i == n {
+				break
+			}
+			text := fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000))
+			wantAck(t, sender, sendMessage(fmt.Sprintf("m-%d", i), "general", text))
+			i++
+		}
+		wantAck(t, sender, leaveRoom("leave", "general"))
+	}
+}
+
+// TestChatRateLimitsMessages runs the handler in a synctest bubble, so the
+// limiter's clock is fake and its refill exact.
+func TestChatRateLimitsMessages(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		hub := chat.NewHub(logger)
+		defer hub.Close()
+		srv := grpcapi.NewChatServer(hub, nil, logger)
+
+		ctx, cancel := context.WithCancel(auth.NewContext(t.Context(), auth.Claims{UserID: "id-alice", Username: "alice"}))
+		defer cancel()
+		stream := newPipeStream(ctx)
+		done := make(chan error, 1)
+		go func() { done <- srv.Connect(stream) }()
+
+		if got := stream.request(t, joinRoom("j", "general")); got.GetAck() == nil {
+			t.Fatalf("reply to join = %v, want an Ack", got)
+		}
+		// Invalid messages are rejected before the limiter and cost nothing.
+		stream.request(t, sendMessage("blank", "general", " "))
+		for i := range grpcapi.MessageBurst {
+			if got := stream.request(t, sendMessage(fmt.Sprint(i), "general", "hi")); got.GetAck() == nil {
+				t.Fatalf("reply to message %d of the burst = %v, want an Ack", i, got)
+			}
+		}
+
+		got := stream.request(t, sendMessage("over", "general", "hi"))
+		want := reply{requestID: "over", code: codes.ResourceExhausted, reason: "RATE_LIMITED"}
+		if diff := cmp.Diff(want, summarize(t, got), cmp.AllowUnexported(reply{})); diff != "" {
+			t.Errorf("reply past the burst mismatch (-want +got):\n%s", diff)
+		}
+		if wait := retryDelay(t, got); wait != grpcapi.MessageInterval {
+			t.Errorf("RetryInfo delay = %v, want %v", wait, grpcapi.MessageInterval)
+		}
+
+		// The rejected message took no token: one interval frees exactly one.
+		time.Sleep(grpcapi.MessageInterval)
+		if got := stream.request(t, sendMessage("later", "general", "hi")); got.GetAck() == nil {
+			t.Errorf("reply after waiting = %v, want an Ack: the stream stays open", got)
+		}
+		if got := stream.request(t, sendMessage("again", "general", "hi")); got.GetError() == nil {
+			t.Errorf("reply to a second message without waiting = %v, want an Error", got)
+		}
+
+		cancel()
+		assertStatus(t, <-done, codes.Canceled, "")
+	})
+}
+
+// pipeStream is a fake stream driven one request at a time from inside a
+// synctest bubble.
+type pipeStream struct {
+	*fakeStream
+	in  chan *chatv1.ConnectRequest
+	out chan *chatv1.ConnectResponse
+}
+
+func newPipeStream(ctx context.Context) *pipeStream {
+	s := &pipeStream{
+		in:  make(chan *chatv1.ConnectRequest),
+		out: make(chan *chatv1.ConnectResponse, 256),
+	}
+	s.fakeStream = &fakeStream{
+		ctx: ctx,
+		recv: func() (*chatv1.ConnectRequest, error) {
+			select {
+			case req := <-s.in:
+				return req, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+		send: func(resp *chatv1.ConnectResponse) error {
+			s.out <- resp
+			return nil
+		},
+	}
+	return s
+}
+
+// request sends req, waits until the bubble is idle and returns the reply,
+// skipping messages.
+func (s *pipeStream) request(t *testing.T, req *chatv1.ConnectRequest) *chatv1.ConnectResponse {
+	t.Helper()
+	s.in <- req
+	synctest.Wait()
+	for {
+		select {
+		case resp := <-s.out:
+			if resp.GetMessage() == nil {
+				return resp
+			}
+		default:
+			t.Fatalf("no reply to %v", req)
+			return nil
+		}
+	}
+}
+
+func retryDelay(t *testing.T, resp *chatv1.ConnectResponse) time.Duration {
+	t.Helper()
+	for _, d := range status.FromProto(resp.GetError().GetStatus()).Details() {
+		if info, ok := d.(*errdetails.RetryInfo); ok {
+			return info.GetRetryDelay().AsDuration()
+		}
+	}
+	t.Fatalf("reply %v has no RetryInfo", resp)
+	return 0
 }
 
 // fakeStream is a chat stream without gRPC behind it, for faults a real

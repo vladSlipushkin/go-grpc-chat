@@ -84,6 +84,13 @@ Things worth checking on the way:
   `-- session expired; press Enter to log in again --` a minute after
   logging in. Press Enter, type the password, and it rejoins its rooms. The
   account must still exist, so this does not survive a server restart.
+- **A console that stops printing.** In the classic Windows console, a
+  click in the window starts a QuickEdit selection, and the console holds
+  every write until Esc or Enter. The client cannot print, so it stops
+  reading its stream too: in a busy room the server drops it as slow, and
+  it reconnects once the selection ends. A message typed just before may
+  report `no reply from the server; it may have gone through`. Windows
+  Terminal does not pause output this way.
 - **Plaintext to another host.** `bin\chat.exe -user alice -addr
   192.168.1.10:50051` refuses to connect: without TLS the password would
   cross the network in the clear. `-insecure` overrides it.

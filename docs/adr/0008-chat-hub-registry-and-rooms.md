@@ -154,9 +154,18 @@ on average and ten at once, with a token bucket (`golang.org/x/time/rate`).
 A message over the limit is rejected in the stream like any request error:
 `RESOURCE_EXHAUSTED` with reason `RATE_LIMITED` and a `google.rpc.RetryInfo`
 saying when the next token is free. The stream stays open. Only messages
-actually posted use up a token: an invalid one is rejected before the
-limiter, and one refused by the limiter or sent to a room not joined gives
-its reservation back.
+actually posted use up a token: an invalid one and one to a room not joined
+are rejected before the limiter, and the limiter's `AllowN` takes nothing
+when it refuses.
+
+Rejected: reserving a token and cancelling the reservation when the message
+is not posted. `x/time/rate` gives a token back only while the reservation's
+time to act has not passed, which for a token taken at once is the moment
+of the reservation; any time spent on the request after it makes the cancel
+do nothing. On Windows, where the clock often does not move between the
+two, the loss does not even show in tests. With a bucket shared by several
+streams, reservations of two streams can also interleave and leave one
+refused message charged.
 
 - Five a second is far above anyone typing, and a burst of ten lets a
   pasted block of lines through. One user then adds at most ten messages

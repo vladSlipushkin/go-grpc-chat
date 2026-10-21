@@ -81,9 +81,8 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	defer sess.Close()
 
 	// Per user, not per stream: opening more streams does not add to the
-	// allowance (ADR-0008). Connect has succeeded, so the claims are there.
-	claims, _ := auth.FromContext(ctx)
-	limiter, release := s.limiters.acquire(claims.UserID)
+	// allowance (ADR-0008).
+	limiter, release := s.limiters.acquire(sess.UserID())
 	defer release()
 
 	reqs := make(chan *chatv1.ConnectRequest)
@@ -236,18 +235,20 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 	case *chatv1.ConnectRequest_LeaveRoom:
 		err = sess.Leave(ctx, a.LeaveRoom.GetRoomId())
 	case *chatv1.ConnectRequest_SendMessage:
-		// Only messages posted use up a token: a rejected one gives its
-		// reservation back (ADR-0008).
-		r := limiter.Reserve()
-		if wait := r.Delay(); wait > 0 {
-			r.Cancel()
-			sess.Enqueue(chat.Rejection{RequestID: id, Err: rateLimited(wait)})
+		// Only messages posted use up a token (ADR-0008): one to a room not
+		// joined is refused before the limiter, and AllowN takes nothing
+		// when it refuses. Nothing is reserved, so nothing has to be given
+		// back, and the user's other streams see a consistent bucket.
+		room := a.SendMessage.GetRoomId()
+		if !sess.InRoom(room) {
+			err = chat.ErrNotMember
+			break
+		}
+		if now := time.Now(); !limiter.AllowN(now, 1) {
+			sess.Enqueue(chat.Rejection{RequestID: id, Err: rateLimited(untilToken(limiter, now))})
 			return
 		}
-		messageID, err = sess.Send(ctx, a.SendMessage.GetRoomId(), a.SendMessage.GetText())
-		if err != nil {
-			r.Cancel()
-		}
+		messageID, err = sess.Send(ctx, room, a.SendMessage.GetText())
 	default:
 		// An action added to the contract but not handled here yet.
 		sess.Enqueue(chat.Rejection{RequestID: id, Err: errUnsupportedAction})
@@ -267,6 +268,11 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 		// ErrHubClosed, ErrRoomFailed or a failure inside the hub.
 		end(err)
 	}
+}
+
+// untilToken returns how long after now limiter has a whole token again.
+func untilToken(limiter *rate.Limiter, now time.Time) time.Duration {
+	return time.Duration((1 - limiter.TokensAt(now)) * float64(messageInterval))
 }
 
 // rateLimited reports a message sent too fast, with how long to wait.

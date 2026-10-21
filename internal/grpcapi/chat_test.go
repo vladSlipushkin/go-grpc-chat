@@ -429,6 +429,27 @@ func flood(t *testing.T, env chatEnv, n int) {
 	}
 }
 
+// TestChatMessageToRoomNotJoinedIsFree runs on the real clock, where time
+// passes between taking a token and learning the message cannot be posted.
+func TestChatMessageToRoomNotJoinedIsFree(t *testing.T) {
+	t.Parallel()
+
+	env := startChat(t, time.Second)
+	alice := env.connect(t, "alice", time.Hour)
+	wantAck(t, alice, joinRoom("j", "general"))
+	for i := range 3 * grpcapi.MessageBurst {
+		req := sendMessage(fmt.Sprintf("elsewhere-%d", i), "random", "hi")
+		send(t, alice, req)
+		if _, resp := nextReply(t, alice); status.FromProto(resp.GetError().GetStatus()).Code() != codes.FailedPrecondition {
+			t.Fatalf("reply to %v = %v, want FAILED_PRECONDITION", req, resp)
+		}
+	}
+	// The whole burst is still there.
+	for i := range grpcapi.MessageBurst {
+		wantAck(t, alice, sendMessage(fmt.Sprint(i), "general", "hi"))
+	}
+}
+
 // TestChatRateLimitsMessages runs the handler in a synctest bubble, so the
 // limiter's clock is fake and its refill exact.
 func TestChatRateLimitsMessages(t *testing.T) {
@@ -448,8 +469,7 @@ func TestChatRateLimitsMessages(t *testing.T) {
 			t.Fatalf("reply to join = %v, want an Ack", got)
 		}
 		// Messages that are not posted cost nothing: an invalid one is
-		// rejected before the limiter, one to a room not joined gives its
-		// token back.
+		// rejected before the limiter, and so is one to a room not joined.
 		rejected := []struct {
 			req  *chatv1.ConnectRequest
 			want reply
@@ -513,6 +533,7 @@ func TestChatRateLimitIsPerUser(t *testing.T) {
 
 		alice := auth.Claims{UserID: "id-alice", Username: "alice"}
 		open := func(claims auth.Claims) (*pipeStream, context.CancelFunc) {
+			t.Helper()
 			ctx, cancel := context.WithCancel(auth.NewContext(t.Context(), claims))
 			s := connectPipe(ctx, srv)
 			if got := s.request(t, joinRoom("j", "general")); got.GetAck() == nil {
@@ -521,6 +542,7 @@ func TestChatRateLimitIsPerUser(t *testing.T) {
 			return s, cancel
 		}
 		post := func(s *pipeStream, id string) *chatv1.ConnectResponse {
+			t.Helper()
 			return s.request(t, sendMessage(id, "general", "hi"))
 		}
 		wantLimited := func(s *pipeStream, id string) {

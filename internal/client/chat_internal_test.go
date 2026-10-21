@@ -1,8 +1,19 @@
 package client
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
 )
 
 func TestBackoffDoublesWithinJitter(t *testing.T) {
@@ -72,5 +83,67 @@ func TestSeqTrackerForgetsLeftRoom(t *testing.T) {
 	}
 	if got := seqs.observe("random", 5); got != 1 {
 		t.Errorf("observe(random, 5) = %d, want 1: other rooms keep their place", got)
+	}
+}
+
+// TestTokenNeedsTLSOnATLSConnection checks the guard behind the token: a
+// session that believes its connection is TLS refuses to send the token
+// over one that is not.
+func TestTokenNeedsTLSOnATLSConnection(t *testing.T) {
+	t.Parallel()
+
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer()
+	chatv1.RegisterChatServiceServer(gs, echoServer{})
+	served := make(chan error, 1)
+	go func() { served <- gs.Serve(lis) }()
+	defer func() {
+		gs.Stop()
+		if err := <-served; err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	}()
+
+	conn, err := Dial("passthrough:///fake", Options{
+		Insecure: true,
+		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		})},
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	conn.secure = true
+
+	chat := conn.NewChat("token", ChatOptions{})
+	go func() {
+		for range chat.Events() {
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := chat.Run(ctx); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("Run() = %v, want UNAUTHENTICATED before anything is sent", err)
+	}
+}
+
+// echoServer acknowledges every request.
+type echoServer struct {
+	chatv1.UnimplementedChatServiceServer
+}
+
+func (echoServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := stream.Send(&chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Ack{Ack: &chatv1.Ack{RequestId: req.GetRequestId()}}}); err != nil {
+			return err
+		}
 	}
 }

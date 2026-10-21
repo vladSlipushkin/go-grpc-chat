@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
@@ -52,6 +54,8 @@ type Options struct {
 	// token, such as "/auth.v1.AuthService/Login". Health checking and
 	// reflection are always public.
 	PublicMethods []string
+	// TLS, if set, makes the server accept only TLS connections.
+	TLS *tls.Config
 }
 
 // Server is a gRPC server with health checking, logging, panic recovery,
@@ -81,7 +85,7 @@ func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
 		public[name] = true
 	}
 
-	g := grpc.NewServer(
+	serverOpts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
 		grpc.MaxConcurrentStreams(maxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -108,7 +112,11 @@ func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
 			streamRecovery(logger),
 			streamAuth(verifier, public),
 		),
-	)
+	}
+	if opts.TLS != nil {
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(opts.TLS)))
+	}
+	g := grpc.NewServer(serverOpts...)
 
 	h := health.NewServer()
 	healthpb.RegisterHealthServer(g, h)

@@ -6,6 +6,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
@@ -47,6 +49,10 @@ var (
 
 // Options configures Dial.
 type Options struct {
+	// TLS, if set, connects with TLS. Without it the connection is
+	// plaintext, which Dial allows only to a loopback address unless
+	// Insecure is set.
+	TLS *tls.Config
 	// Insecure allows a plaintext connection to an address that is not
 	// loopback.
 	Insecure bool
@@ -60,16 +66,23 @@ type Conn struct {
 	cc   *grpc.ClientConn
 	auth authv1.AuthServiceClient
 	chat chatv1.ChatServiceClient
+	// secure reports a TLS connection; the token then goes only over one
+	// (see bearer).
+	secure bool
 }
 
 // Dial returns a connection to addr, a "host:port" address. It does not
 // wait for the server: the first call connects.
 func Dial(addr string, opts Options) (*Conn, error) {
-	if !opts.Insecure && !isLoopback(addr) {
+	creds := insecure.NewCredentials()
+	switch {
+	case opts.TLS != nil:
+		creds = credentials.NewTLS(opts.TLS)
+	case !opts.Insecure && !isLoopback(addr):
 		return nil, fmt.Errorf("%w: %s", ErrPlaintext, addr)
 	}
 	dialOpts := append([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:    keepaliveTime,
 			Timeout: keepaliveTimeout,
@@ -95,7 +108,28 @@ func Dial(addr string, opts Options) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-	return &Conn{cc: cc, auth: authv1.NewAuthServiceClient(cc), chat: chatv1.NewChatServiceClient(cc)}, nil
+	return &Conn{
+		cc:     cc,
+		auth:   authv1.NewAuthServiceClient(cc),
+		chat:   chatv1.NewChatServiceClient(cc),
+		secure: opts.TLS != nil,
+	}, nil
+}
+
+// bearer puts the access token in a call's metadata. On a TLS connection
+// it requires transport security, so gRPC refuses to send the token over
+// anything less; a plaintext connection exists only where Dial allowed one.
+type bearer struct {
+	token  string
+	secure bool
+}
+
+func (b bearer) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+
+func (b bearer) RequireTransportSecurity() bool {
+	return b.secure
 }
 
 // isLoopback reports whether addr names this machine: localhost or a

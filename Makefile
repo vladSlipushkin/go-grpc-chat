@@ -109,12 +109,14 @@ run:
 	go run ./cmd/server
 
 # Development certificates for trying TLS; see tools/devcert.
+DEVCERT = go -C tools run ./devcert -dir ../certs
+
 .PHONY: certs
 certs:
-	go -C tools run ./devcert -dir ../certs
+	$(DEVCERT)
 
 certs/server.pem:
-	go -C tools run ./devcert -dir ../certs
+	$(DEVCERT)
 
 .PHONY: up
 up:

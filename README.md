@@ -35,6 +35,7 @@ With TLS, on development certificates:
 
 ```
 make up-tls    # writes certs/ on first use
+bin/chat register -user alice -ca certs/ca.pem
 bin/chat -user alice -ca certs/ca.pem
 ```
 

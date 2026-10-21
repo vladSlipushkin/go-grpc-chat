@@ -1,6 +1,7 @@
 // Command devcert writes a development CA and a server certificate it
 // issued, for trying the server with TLS locally (ADR-0012). Nothing it
-// writes belongs in a deployment.
+// writes belongs in a deployment. The CA's key is not kept: running it
+// again replaces both.
 //
 //	go -C tools run ./devcert -dir ../certs
 package main
@@ -36,13 +37,13 @@ func run() error {
 	flag.Parse()
 
 	if err := os.MkdirAll(*dir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("create directory: %w", err)
 	}
 	now := time.Now()
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return err
+		return fmt.Errorf("generate CA key: %w", err)
 	}
 	caTmpl := &x509.Certificate{
 		SerialNumber:          serial(),
@@ -61,7 +62,7 @@ func run() error {
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return err
+		return fmt.Errorf("generate server key: %w", err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
@@ -84,7 +85,7 @@ func run() error {
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode server key: %w", err)
 	}
 
 	// The key is readable by everyone: the server in the container runs
@@ -100,7 +101,7 @@ func run() error {
 	for _, f := range files {
 		path := filepath.Join(*dir, f.name)
 		if err := os.WriteFile(path, pem.EncodeToMemory(f.block), 0o644); err != nil { //nolint:gosec // a development key, see above
-			return err
+			return fmt.Errorf("write %s: %w", f.name, err)
 		}
 		fmt.Println("wrote", path)
 	}

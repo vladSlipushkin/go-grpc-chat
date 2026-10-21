@@ -101,6 +101,8 @@ func parse(args []string, stderr io.Writer) (options, error) {
 		fmt.Fprintln(stderr, "-user is required")
 	case o.insecure && (o.tls || o.ca != ""):
 		fmt.Fprintln(stderr, "-insecure cannot be combined with -tls or -ca")
+	case o.tls && o.ca != "":
+		fmt.Fprintln(stderr, "-tls and -ca cannot be combined: -ca already connects with TLS")
 	default:
 		return o, nil
 	}

@@ -131,7 +131,7 @@ func LoadHealthcheck(lookup LookupFunc) (Healthcheck, error) {
 		return Healthcheck{}, fmt.Errorf("CHAT_GRPC_ADDR: %w", err)
 	}
 	// A server listening on every address is reached on loopback.
-	if ip, err := netip.ParseAddr(host); host == "" || err == nil && ip.IsUnspecified() {
+	if ip, err := netip.ParseAddr(host); host == "" || (err == nil && ip.IsUnspecified()) {
 		host = "127.0.0.1"
 	}
 	cert, _ := lookup("CHAT_TLS_CERT_FILE")

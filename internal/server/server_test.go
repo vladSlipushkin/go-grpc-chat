@@ -255,6 +255,46 @@ func TestListenerFailureShutsDownAcceptedConnections(t *testing.T) {
 	}
 }
 
+func TestOnShutdownRunsWhateverStartsShutdown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		trigger func(t *testing.T, ts testServer)
+	}{
+		{name: "context cancelled", trigger: func(t *testing.T, ts testServer) {
+			t.Helper()
+			if err := ts.stop(); err != nil {
+				t.Errorf("Serve() = %v", err)
+			}
+		}},
+		{name: "listener failed", trigger: func(t *testing.T, ts testServer) {
+			t.Helper()
+			if err := ts.lis.Close(); err != nil {
+				t.Errorf("close listener: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			called := make(chan struct{})
+			ts := startServer(t, newServer(server.Options{
+				ShutdownTimeout: time.Second,
+				OnShutdown:      func() { close(called) },
+			}))
+			checkHealth(t, ts.conn)
+			tt.trigger(t, ts)
+			select {
+			case <-called:
+			case <-time.After(5 * time.Second):
+				t.Fatal("OnShutdown not called within 5s")
+			}
+		})
+	}
+}
+
 func TestServeFailsWhenListenerIsClosed(t *testing.T) {
 	t.Parallel()
 

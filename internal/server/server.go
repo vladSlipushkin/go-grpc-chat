@@ -56,6 +56,10 @@ type Options struct {
 	PublicMethods []string
 	// TLS, if set, makes the server accept only TLS connections.
 	TLS *tls.Config
+	// OnShutdown, if set, is called once shutdown starts, whatever started
+	// it, before running RPCs are waited for. Services whose RPCs do not
+	// end on their own, such as chat streams, end them here (ADR-0006).
+	OnShutdown func()
 }
 
 // Server is a gRPC server with health checking, logging, panic recovery,
@@ -67,6 +71,7 @@ type Server struct {
 	health          *health.Server
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
+	onShutdown      func()
 }
 
 var _ grpc.ServiceRegistrar = (*Server)(nil)
@@ -129,6 +134,7 @@ func New(logger *slog.Logger, verifier TokenVerifier, opts Options) *Server {
 		health:          h,
 		logger:          logger,
 		shutdownTimeout: opts.ShutdownTimeout,
+		onShutdown:      opts.OnShutdown,
 	}
 }
 
@@ -175,6 +181,9 @@ func (s *Server) shutdown(ctx context.Context) {
 	// close at about the same moment; there is no drain delay.
 	s.health.Shutdown()
 	s.logger.InfoContext(ctx, "shutting down", slog.Duration("timeout", s.shutdownTimeout))
+	if s.onShutdown != nil {
+		s.onShutdown()
+	}
 
 	stopped := make(chan struct{})
 	go func() {

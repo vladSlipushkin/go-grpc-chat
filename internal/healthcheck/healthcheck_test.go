@@ -111,7 +111,10 @@ func serve(t *testing.T, files certtest.Files) string {
 	return lis.Addr().String()
 }
 
-// stoppedAddr returns a loopback address nothing listens on any more.
+// stoppedAddr returns a loopback address nothing listens on any more. The
+// kernel could hand the port to another listener in the meantime, such as a
+// parallel test's server; it rarely reuses one at once, and a failure then
+// shows as this check passing, not as a hang.
 func stoppedAddr(t *testing.T) string {
 	t.Helper()
 

@@ -43,7 +43,7 @@ type Options struct {
 // fails to start. Accounts are kept in memory and end with it.
 func Serve(ctx context.Context, logger *slog.Logger, lis net.Listener, opts Options) error {
 	// Interceptors built by New take each call's context from the call itself.
-	srv, hub, err := build(logger, opts, ctx.Done()) //nolint:contextcheck // false positive, see above
+	srv, hub, err := build(logger, opts) //nolint:contextcheck // false positive, see above
 	if err != nil {
 		_ = lis.Close()
 		return err
@@ -64,9 +64,8 @@ func Serve(ctx context.Context, logger *slog.Logger, lis net.Listener, opts Opti
 	return nil
 }
 
-// build creates the server with every service registered. The chat service
-// ends its streams when shutdown is closed.
-func build(logger *slog.Logger, opts Options, shutdown <-chan struct{}) (*server.Server, *chat.Hub, error) {
+// build creates the server with every service registered.
+func build(logger *slog.Logger, opts Options) (*server.Server, *chat.Hub, error) {
 	tokens, err := auth.NewTokens(opts.JWTSecret, opts.TokenTTL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create token issuer: %w", err)
@@ -84,6 +83,9 @@ func build(logger *slog.Logger, opts Options, shutdown <-chan struct{}) (*server
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
 	}
 
+	// Chat streams end as soon as shutdown starts, whether a signal or a
+	// failing listener started it (ADR-0006).
+	shutdown := make(chan struct{})
 	srv := server.New(logger, tokens, server.Options{
 		Reflection:      opts.Reflection,
 		ShutdownTimeout: opts.ShutdownTimeout,
@@ -91,7 +93,8 @@ func build(logger *slog.Logger, opts Options, shutdown <-chan struct{}) (*server
 			authv1.AuthService_Register_FullMethodName,
 			authv1.AuthService_Login_FullMethodName,
 		},
-		TLS: tlsConfig,
+		TLS:        tlsConfig,
+		OnShutdown: func() { close(shutdown) },
 	})
 	hub := chat.NewHub(logger)
 	// Every service is registered here, before Serve (ADR-0006).

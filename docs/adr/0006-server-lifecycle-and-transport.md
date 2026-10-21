@@ -45,9 +45,10 @@ reading: its final status waits behind data the client will not accept, so
 its connection stays open until `Stop` (ADR-0009).
 
 `GracefulStop` does not cancel the contexts of running streams; it only stops
-new RPCs. Chat stream handlers therefore get an explicit shutdown signal
-from the process's root context, not from their stream context, and end
-their streams with `UNAVAILABLE` (ADR-0003, ADR-0009). Clients then get a
+new RPCs. Chat stream handlers therefore get an explicit shutdown signal, a
+channel the server closes when shutdown starts (`Options.OnShutdown`),
+whether a signal or a failing listener started it, and end their streams
+with `UNAVAILABLE` (ADR-0003, ADR-0009). Clients then get a
 clear status and can reconnect elsewhere instead of being cut off by
 `Stop`.
 

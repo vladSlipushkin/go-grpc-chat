@@ -21,6 +21,7 @@ import (
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -880,6 +881,37 @@ func TestDialTLSChecksTheServer(t *testing.T) {
 				t.Errorf("Login() = %v, want UNAVAILABLE: the connection must fail", err)
 			}
 		})
+	}
+}
+
+func TestTokenNeedsTLSWhenTLSWasAskedFor(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{}) // plaintext
+	srv.Register(t, "alice", password)
+	conn, err := client.Dial(chattest.Target, client.Options{
+		TLS: &tls.Config{MinVersion: tls.VersionTLS13},
+		// A later transport option replaces TLS, as a misconfigured caller
+		// would do.
+		DialOptions: append(srv.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials())),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	// Login carries no token.
+	tok, err := conn.Login(ctxFor(t), "alice", password)
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+
+	chat := conn.NewChat(tok.Value, client.ChatOptions{})
+	go func() {
+		for range chat.Events() {
+		}
+	}()
+	if err := chat.Run(ctxFor(t)); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("Run() = %v, want UNAUTHENTICATED: a valid token must not go over plaintext", err)
 	}
 }
 

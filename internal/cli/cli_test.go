@@ -261,6 +261,7 @@ func TestUsage(t *testing.T) {
 		{name: "no user", args: nil, wantErr: cli.ErrUsage, wantStderr: "-user is required"},
 		{name: "extra argument", args: []string{"-user", "alice", "now"}, wantErr: cli.ErrUsage, wantStderr: `unexpected argument "now"`},
 		{name: "TLS and insecure", args: []string{"-user", "alice", "-tls", "-insecure"}, wantErr: cli.ErrUsage, wantStderr: "-insecure cannot be combined with -tls or -ca"},
+		{name: "TLS and CA", args: []string{"-user", "alice", "-tls", "-ca", "ca.pem"}, wantErr: cli.ErrUsage, wantStderr: "-tls and -ca cannot be combined"},
 		{name: "unknown flag", args: []string{"register", "-name", "alice"}, wantErr: cli.ErrUsage, wantStderr: "flag provided but not defined: -name"},
 		{name: "help", args: []string{"-h"}, wantErr: flag.ErrHelp, wantStderr: "chat register -user NAME"},
 	}

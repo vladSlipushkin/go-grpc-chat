@@ -205,8 +205,10 @@ bin\chat.exe -user alice -ca certs\ca.pem
 ```
 
 `make up-tls` writes development certificates into `certs\` the first
-time. Without `-ca` the client fails with `certificate signed by unknown
-authority`; with `-insecure` instead, the server closes the connection.
+time. With `-tls` instead of `-ca` the client fails with `certificate
+signed by unknown authority`, since the system does not trust the
+development CA; with no flag, or with `-insecure`, it speaks plaintext and
+the server closes the connection.
 grpcurl needs the CA too: `bin\grpcurl.exe -cacert certs\ca.pem
 localhost:50051 list` (reflection is off in the container, so it reports
 that; the TLS handshake has passed by then).

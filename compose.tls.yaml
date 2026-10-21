@@ -1,6 +1,6 @@
-# The server with TLS, on top of compose.yaml:
-#   make certs
-#   docker compose -f compose.yaml -f compose.tls.yaml up --detach --wait server
+# The server with TLS, on top of compose.yaml; make up-tls runs
+#   docker compose -f compose.yaml -f compose.tls.yaml up --detach --wait --build
+# after writing certs/ if needed.
 services:
   server:
     environment:

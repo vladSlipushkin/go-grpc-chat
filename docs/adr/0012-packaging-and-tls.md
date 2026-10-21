@@ -50,8 +50,11 @@ it needs no configuration of its own and no secret.
 - Rejected: adding `grpc_health_probe` to the image, a second binary to
   version and patch for one call; and no health check at all, which leaves
   `docker compose up --wait` and `depends_on` nothing to wait for.
-- During shutdown the health service reports `NOT_SERVING` (ADR-0006), so
-  the container turns unhealthy as soon as it starts stopping.
+- During shutdown the health service reports `NOT_SERVING` and the
+  listener closes at about the same moment (no drain delay, ADR-0006), so
+  a check run then fails. Docker marks the container unhealthy only after
+  three failures in a row, which a stop that takes under a second never
+  reaches; an orchestrator stopping the container already knows.
 - The check gives itself 2 seconds, inside the 3 the container allows.
 
 With TLS, the check connects to the server's own address and trusts
@@ -123,7 +126,7 @@ openssl, which Windows does not ship.
 `docs/demo.gif` is recorded by VHS from `docs/demo/demo.tape`, in a Docker
 image with tmux, the server and two clients (`make demo`). Anyone can
 record it again and get the same result; nothing depends on the host's
-terminal.
+terminal. Its base images are pinned like the server's.
 
 ## Consequences
 

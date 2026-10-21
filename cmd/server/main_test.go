@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
-	"net"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/vladSlipushkin/go-grpc-chat/internal/certtest"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/config"
 )
 
 func TestMain(m *testing.M) {
@@ -27,12 +29,10 @@ func TestRunServesUntilCancelled(t *testing.T) {
 		"CHAT_GRPC_ADDR":  "127.0.0.1:0",
 		"CHAT_JWT_SECRET": "0123456789abcdef0123456789abcdef",
 	}
-	lookup := func(key string) (string, bool) { v, ok := env[key]; return v, ok }
-
 	ctx, cancel := context.WithCancel(t.Context())
 	var out lockedBuffer
 	errc := make(chan error, 1)
-	go func() { errc <- run(ctx, nil, lookup, &out, bcrypt.MinCost) }()
+	go func() { errc <- run(ctx, nil, lookupFrom(env), &out, bcrypt.MinCost) }()
 
 	// Cancel once the listener is bound, so the test covers a start that got
 	// past configuration and listening before it stops.
@@ -69,10 +69,8 @@ func TestHealthcheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// The check finds the server by its configured address, so the
-			// port must be known before the server starts.
 			env := map[string]string{
-				"CHAT_GRPC_ADDR":  "127.0.0.1:" + freePort(t),
+				"CHAT_GRPC_ADDR":  "127.0.0.1:0",
 				"CHAT_JWT_SECRET": "0123456789abcdef0123456789abcdef",
 			}
 			if tt.tls {
@@ -80,44 +78,62 @@ func TestHealthcheck(t *testing.T) {
 				env["CHAT_TLS_CERT_FILE"] = files.Cert
 				env["CHAT_TLS_KEY_FILE"] = files.Key
 			}
-			lookup := func(key string) (string, bool) { v, ok := env[key]; return v, ok }
-			healthcheck := func() error { return run(t.Context(), []string{"-healthcheck"}, lookup, io.Discard, bcrypt.MinCost) }
+			addr := startServer(t, env)
 
-			if err := healthcheck(); err == nil {
-				t.Error("-healthcheck before the server started = nil, want an error")
-			}
-
-			ctx, cancel := context.WithCancel(t.Context())
-			var out lockedBuffer
-			errc := make(chan error, 1)
-			go func() { errc <- run(ctx, nil, lookup, &out, bcrypt.MinCost) }()
-			waitFor(t, 5*time.Second, func() bool { return strings.Contains(out.String(), "server started") })
-			if err := healthcheck(); err != nil {
+			// The check reads the same environment, with the port the
+			// server got.
+			checkEnv := maps.Clone(env)
+			checkEnv["CHAT_GRPC_ADDR"] = addr
+			if err := run(t.Context(), []string{"-healthcheck"}, lookupFrom(checkEnv), io.Discard, bcrypt.MinCost); err != nil {
 				t.Errorf("-healthcheck = %v, want nil", err)
-			}
-
-			cancel()
-			if err := <-errc; err != nil {
-				t.Errorf("run() = %v, want nil", err)
 			}
 		})
 	}
 }
 
-// freePort returns a loopback port that was free a moment ago.
-func freePort(t *testing.T) string {
+// startServer runs the server with env until the test ends and returns the
+// address it listens on, read from its "server started" record.
+func startServer(t *testing.T, env map[string]string) string {
 	t.Helper()
-	var lc net.ListenConfig
-	lis, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out lockedBuffer
+	errc := make(chan error, 1)
+	go func() { errc <- run(ctx, nil, lookupFrom(env), &out, bcrypt.MinCost) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-errc:
+			if err != nil {
+				t.Errorf("run() = %v, want nil", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("run() did not return after the context was cancelled")
+		}
+	})
+
+	var addr string
+	waitFor(t, 5*time.Second, func() bool {
+		for line := range strings.Lines(out.String()) {
+			var rec struct {
+				Msg  string `json:"msg"`
+				Addr string `json:"addr"`
+			}
+			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "server started" {
+				addr = rec.Addr
+				return true
+			}
+		}
+		return false
+	})
+	return addr
+}
+
+func lookupFrom(env map[string]string) config.LookupFunc {
+	return func(key string) (string, bool) {
+		v, ok := env[key]
+		return v, ok
 	}
-	defer lis.Close()
-	_, port, err := net.SplitHostPort(lis.Addr().String())
-	if err != nil {
-		t.Fatalf("split %s: %v", lis.Addr(), err)
-	}
-	return port
 }
 
 func TestRunRejectsInvalidConfig(t *testing.T) {

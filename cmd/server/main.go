@@ -24,8 +24,16 @@ import (
 // health check allows it.
 const healthcheckTimeout = 2 * time.Second
 
+// errUsage reports flags that could not be parsed; the flag package has
+// already printed why.
+var errUsage = errors.New("invalid usage")
+
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.LookupEnv, os.Stdout, auth.DefaultBcryptCost); err != nil {
+	err := run(context.Background(), os.Args[1:], os.LookupEnv, os.Stdout, auth.DefaultBcryptCost)
+	switch {
+	case errors.Is(err, errUsage):
+		os.Exit(2)
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		os.Exit(1)
 	}
@@ -44,7 +52,7 @@ func run(ctx context.Context, args []string, lookupEnv config.LookupFunc, stdout
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return errUsage
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))

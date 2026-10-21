@@ -43,6 +43,8 @@ func TestLoad(t *testing.T) {
 				"CHAT_REFLECTION":       "true",
 				"CHAT_JWT_SECRET":       testSecret,
 				"CHAT_TOKEN_TTL":        "15m",
+				"CHAT_TLS_CERT_FILE":    "/certs/server.pem",
+				"CHAT_TLS_KEY_FILE":     "/certs/server.key",
 			},
 			want: config.Config{
 				GRPCAddr:        "127.0.0.1:9000",
@@ -51,6 +53,8 @@ func TestLoad(t *testing.T) {
 				Reflection:      true,
 				JWTSecret:       []byte(testSecret),
 				TokenTTL:        15 * time.Minute,
+				TLSCertFile:     "/certs/server.pem",
+				TLSKeyFile:      "/certs/server.key",
 			},
 		},
 	}
@@ -118,6 +122,16 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			wantErr: []string{"CHAT_TOKEN_TTL: must be positive"},
 		},
 		{
+			name:    "certificate without key",
+			env:     withSecret(map[string]string{"CHAT_TLS_CERT_FILE": "/certs/server.pem"}),
+			wantErr: []string{"CHAT_TLS_CERT_FILE and CHAT_TLS_KEY_FILE: set both or neither"},
+		},
+		{
+			name:    "key without certificate",
+			env:     withSecret(map[string]string{"CHAT_TLS_KEY_FILE": "/certs/server.key"}),
+			wantErr: []string{"CHAT_TLS_CERT_FILE and CHAT_TLS_KEY_FILE: set both or neither"},
+		},
+		{
 			name: "every invalid variable is reported",
 			env: withSecret(map[string]string{
 				"CHAT_LOG_LEVEL":        "loud",
@@ -159,4 +173,46 @@ func withSecret(env map[string]string) map[string]string {
 	out := map[string]string{"CHAT_JWT_SECRET": testSecret}
 	maps.Copy(out, env)
 	return out
+}
+
+func TestLoadHealthcheck(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    config.Healthcheck
+		wantErr string
+	}{
+		// The check runs with the server's environment but needs none of
+		// its secrets.
+		{name: "defaults", env: map[string]string{}, want: config.Healthcheck{Addr: "127.0.0.1:50051"}},
+		{name: "any address", env: map[string]string{"CHAT_GRPC_ADDR": "0.0.0.0:9000"}, want: config.Healthcheck{Addr: "127.0.0.1:9000"}},
+		{name: "any IPv6 address", env: map[string]string{"CHAT_GRPC_ADDR": "[::]:9000"}, want: config.Healthcheck{Addr: "127.0.0.1:9000"}},
+		{name: "one address", env: map[string]string{"CHAT_GRPC_ADDR": "10.0.0.7:9000"}, want: config.Healthcheck{Addr: "10.0.0.7:9000"}},
+		{
+			name: "TLS",
+			env:  map[string]string{"CHAT_TLS_CERT_FILE": "/certs/server.pem", "CHAT_TLS_KEY_FILE": "/certs/server.key"},
+			want: config.Healthcheck{Addr: "127.0.0.1:50051", TLSCertFile: "/certs/server.pem"},
+		},
+		{name: "no port", env: map[string]string{"CHAT_GRPC_ADDR": "localhost"}, wantErr: "CHAT_GRPC_ADDR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := config.LoadHealthcheck(lookupFrom(tt.env))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("LoadHealthcheck() error = %v, want one mentioning %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadHealthcheck() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("LoadHealthcheck() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

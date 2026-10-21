@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -20,10 +21,12 @@ import (
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/certtest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chattest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/client"
 )
@@ -832,6 +835,86 @@ func TestDialRefusesPlaintextToRemoteAddress(t *testing.T) {
 	}
 }
 
+func TestChatOverTLS(t *testing.T) {
+	t.Parallel()
+
+	// Issued through an intermediate, as by a real CA.
+	srv := chattest.Start(t, chattest.Options{TLS: certtest.Issued(t, chattest.Host)})
+	alice, bob := connect(t, srv, "alice", options{}), connect(t, srv, "bob", options{})
+	alice.join(t, "general")
+	bob.join(t, "general")
+	alice.say(t, "over TLS")
+	if m := bob.message(t); m.Text != "over TLS" {
+		t.Errorf("bob's message = %q, want %q", m.Text, "over TLS")
+	}
+}
+
+func TestDialTLSChecksTheServer(t *testing.T) {
+	t.Parallel()
+
+	files := certtest.SelfSigned(t, chattest.Host)
+	srv := chattest.Start(t, chattest.Options{TLS: files})
+	trusted := srv.ClientTLS(t)
+	otherName := trusted.Clone()
+	otherName.ServerName = "chat.example.com"
+
+	tests := []struct {
+		name string
+		opts client.Options
+	}{
+		// The system roots do not include a self-signed certificate.
+		{name: "untrusted certificate", opts: client.Options{TLS: &tls.Config{MinVersion: tls.VersionTLS13}}},
+		{name: "certificate for another name", opts: client.Options{TLS: otherName}},
+		{name: "plaintext", opts: client.Options{Insecure: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tt.opts.DialOptions = srv.DialOptions()
+			conn, err := client.Dial(chattest.Target, tt.opts)
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			defer conn.Close()
+			if _, err := conn.Login(ctxFor(t), "alice", password); status.Code(err) != codes.Unavailable {
+				t.Errorf("Login() = %v, want UNAVAILABLE: the connection must fail", err)
+			}
+		})
+	}
+}
+
+func TestTokenNeedsTLSWhenTLSWasAskedFor(t *testing.T) {
+	t.Parallel()
+
+	srv := chattest.Start(t, chattest.Options{}) // plaintext
+	srv.Register(t, "alice", password)
+	conn, err := client.Dial(chattest.Target, client.Options{
+		TLS: &tls.Config{MinVersion: tls.VersionTLS13},
+		// A later transport option replaces TLS, as a misconfigured caller
+		// would do.
+		DialOptions: append(srv.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials())),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	// Login carries no token.
+	tok, err := conn.Login(ctxFor(t), "alice", password)
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+
+	chat := conn.NewChat(tok.Value, client.ChatOptions{})
+	go func() {
+		for range chat.Events() {
+		}
+	}()
+	if err := chat.Run(ctxFor(t)); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("Run() = %v, want UNAUTHENTICATED: a valid token must not go over plaintext", err)
+	}
+}
+
 func TestRegisterAndLoginErrors(t *testing.T) {
 	t.Parallel()
 
@@ -894,9 +977,11 @@ func connect(t *testing.T, srv *chattest.Server, name string, opts options) *use
 	return start(t, name, conn.NewChat(tok.Value, chatOpts), !opts.unread)
 }
 
+// dial connects to srv, with TLS if srv serves it.
 func dial(t *testing.T, srv *chattest.Server, extra []grpc.DialOption) *client.Conn {
 	t.Helper()
 	conn, err := client.Dial(chattest.Target, client.Options{
+		TLS:         srv.ClientTLS(t),
 		Insecure:    true,
 		DialOptions: append(srv.DialOptions(), extra...),
 	})

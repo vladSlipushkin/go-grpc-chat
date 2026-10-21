@@ -14,7 +14,6 @@ import (
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -71,6 +70,7 @@ type chatStream = grpc.BidiStreamingClient[chatv1.ConnectRequest, chatv1.Connect
 // (ADR-0010). Join, Leave, Send and Rooms are safe for concurrent use.
 type Chat struct {
 	api     chatv1.ChatServiceClient
+	secure  bool // the connection is TLS
 	token   string
 	relogin func(context.Context) (string, error)
 	backoff backoff
@@ -115,6 +115,7 @@ func (c *Conn) NewChat(token string, opts ChatOptions) *Chat {
 	}
 	return &Chat{
 		api:     c.chat,
+		secure:  c.secure,
 		token:   token,
 		relogin: opts.Relogin,
 		backoff: b,
@@ -259,7 +260,7 @@ func (c *Chat) serve(ctx context.Context, token string) (lasted time.Duration, e
 	// stream given up here does not linger there.
 	defer cancel()
 
-	stream, err := c.api.Connect(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token))
+	stream, err := c.api.Connect(ctx, grpc.PerRPCCredentials(bearer{token: token, secure: c.secure}))
 	if err != nil {
 		return 0, err
 	}

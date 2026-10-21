@@ -19,7 +19,8 @@ already say what any client must do:
   the stream at once and drops what it has not sent (ADR-0009);
 - ping no more often than once a minute (ADR-0006).
 
-The server has no TLS yet, and a login sends the password.
+The server had no TLS when this was written (ADR-0012 adds it), and a
+login sends the password.
 
 ## Decision
 
@@ -237,9 +238,9 @@ else fails before a byte is sent, with an error naming the flag.
   the host reach a published port on `localhost` and need neither.
 
 In a real deployment, TLS is either terminated at the ingress in front of
-the server or enabled on the server itself. The packaging stage adds the
-latter as an option: a certificate and key in the server's configuration,
-and `-tls` with a CA file on the client.
+the server or enabled on the server itself. ADR-0012 adds the latter as an
+option: a certificate and key in the server's configuration, and `-tls` or
+`-ca FILE` on the client.
 
 ## Consequences
 

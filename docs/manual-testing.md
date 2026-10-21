@@ -1,10 +1,11 @@
 # Manual testing on Windows
 
-How to try the server by hand: the chat client in two terminals, then the
-raw API with grpcurl. Every command below works as written in both cmd and
-PowerShell. Run them from the repository root.
+How to try the server by hand: the chat client in two terminals, the raw
+API with grpcurl, then the container with and without TLS. Every command
+below works as written in both cmd and PowerShell. Run them from the
+repository root.
 
-Requirements: Go 1.27 and GNU make. Docker is not needed.
+Requirements: Go 1.27 and GNU make; Docker only for section 5.
 
 ## 1. Start the server
 
@@ -168,3 +169,56 @@ Other services are listed by reflection:
 ```
 bin\grpcurl.exe -plaintext localhost:50051 list
 ```
+
+## 5. The container
+
+Stop `make run` first: both listen on port 50051.
+
+```
+make up
+docker compose ps
+```
+
+`make up` builds the image and waits until the server's health check
+passes; `docker compose ps` shows it `healthy`. The client from section 3
+connects to it as before, `bin\chat.exe -user alice`, after registering
+again: the container starts with no accounts.
+
+Stop it with a client connected:
+
+```
+docker compose stop server
+docker compose logs server
+```
+
+The stop takes about a second, the client prints `-- connection lost
+(server unavailable); reconnecting ... --`, and the log ends with
+`shutting down` and `server stopped`, not a kill.
+
+With TLS:
+
+```
+make down
+make up-tls
+bin\chat.exe register -user alice -ca certs\ca.pem
+bin\chat.exe -user alice -ca certs\ca.pem
+```
+
+`make up-tls` writes development certificates into `certs\` the first
+time. With `-tls` instead of `-ca` the client fails with `certificate
+signed by unknown authority`, since the system does not trust the
+development CA; with no flag, or with `-insecure`, it speaks plaintext and
+the server closes the connection.
+grpcurl needs the CA too: `bin\grpcurl.exe -cacert certs\ca.pem
+localhost:50051 list` (reflection is off in the container, so it reports
+that; the TLS handshake has passed by then).
+
+A client in another container is not on loopback, so it needs TLS or
+`-insecure`. The image has the client:
+
+```
+docker run --rm -it --network go-grpc-chat_default -v "%cd%\certs:/certs:ro" --entrypoint chat go-grpc-chat-server -user alice -addr server:50051 -ca /certs/ca.pem
+```
+
+In PowerShell write `${PWD}` instead of `%cd%`. `make down` stops
+everything.

@@ -45,9 +45,10 @@ reading: its final status waits behind data the client will not accept, so
 its connection stays open until `Stop` (ADR-0009).
 
 `GracefulStop` does not cancel the contexts of running streams; it only stops
-new RPCs. Chat stream handlers therefore get an explicit shutdown signal
-from the process's root context, not from their stream context, and end
-their streams with `UNAVAILABLE` (ADR-0003, ADR-0009). Clients then get a
+new RPCs. Chat stream handlers therefore get an explicit shutdown signal, a
+channel the server closes when shutdown starts (`Options.OnShutdown`),
+whether a signal or a failing listener started it, and end their streams
+with `UNAVAILABLE` (ADR-0003, ADR-0009). Clients then get a
 clear status and can reconnect elsewhere instead of being cut off by
 `Stop`.
 
@@ -67,12 +68,12 @@ is needed for signal handling.
 The orchestrator's grace period must be longer than the shutdown timeout,
 otherwise it kills the process before `Stop` gets to cancel running RPCs:
 `docker stop` waits 10 seconds by default, exactly the default timeout here.
-The packaging stage sets `stop_grace_period` in Compose (and
-`terminationGracePeriodSeconds` for Kubernetes) with a margin over
-`CHAT_SHUTDOWN_TIMEOUT`. Behind a load balancer the missing drain delay
-means clients can still be routed to the server for a moment after it
-stops listening; a pause before `GracefulStop` would cover that and is
-deferred to the same stage.
+Compose sets `stop_grace_period` to 15 seconds (ADR-0012); Kubernetes
+would need the same margin in `terminationGracePeriodSeconds`. Behind a
+load balancer the missing drain delay means clients can still be routed to
+the server for a moment after it stops listening; a pause before
+`GracefulStop` would cover that, and is left until there are several
+instances to route to (ADR-0011).
 
 Rejected: `grpc.WaitForHandlers(true)` with a single `Stop`. It makes `Stop`
 wait for handlers, which `GracefulStop` already does, and it is still marked
@@ -110,10 +111,9 @@ already accepted connections running.
   is not refused but hangs in the kernel's accept backlog until its dial
   times out, with no status to act on. A limit per client address fails
   behind a proxy, where every connection comes from the proxy. Connection
-  limits belong to the load balancer or ingress in front of the server,
-  which the packaging stage sets up. Until then this is an accepted risk:
-  one client can open connections until the process runs out of memory or
-  file descriptors.
+  limits belong to the load balancer or ingress in front of the server
+  (ADR-0011). Without one this is an accepted risk: one client can open
+  connections until the process runs out of memory or file descriptors.
 
 ### Interceptors
 

@@ -4,10 +4,13 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"google.golang.org/grpc"
@@ -45,8 +48,8 @@ type Env struct {
 }
 
 const usage = `Usage:
-  chat register -user NAME [-addr HOST:PORT] [-insecure]
-  chat -user NAME [-addr HOST:PORT] [-insecure]
+  chat register -user NAME [-addr HOST:PORT] [-tls | -ca FILE | -insecure]
+  chat -user NAME [-addr HOST:PORT] [-tls | -ca FILE | -insecure]
 
 register creates an account; without it, chat logs in and starts a session.
 Both ask for the password.
@@ -66,6 +69,8 @@ func Run(ctx context.Context, args []string, env Env) error {
 type options struct {
 	user     string
 	addr     string
+	tls      bool
+	ca       string
 	insecure bool
 }
 
@@ -79,6 +84,8 @@ func parse(args []string, stderr io.Writer) (options, error) {
 	var o options
 	fs.StringVar(&o.user, "user", "", "username (required)")
 	fs.StringVar(&o.addr, "addr", "localhost:50051", "server address")
+	fs.BoolVar(&o.tls, "tls", false, "connect with TLS, trusting the system's root certificates")
+	fs.StringVar(&o.ca, "ca", "", "connect with TLS, trusting the CA certificate in `FILE`")
 	fs.BoolVar(&o.insecure, "insecure", false, "allow a connection without TLS to an address that is not loopback")
 
 	if err := fs.Parse(args); err != nil {
@@ -92,6 +99,10 @@ func parse(args []string, stderr io.Writer) (options, error) {
 		fmt.Fprintf(stderr, "unexpected argument %q\n", fs.Arg(0))
 	case o.user == "":
 		fmt.Fprintln(stderr, "-user is required")
+	case o.insecure && (o.tls || o.ca != ""):
+		fmt.Fprintln(stderr, "-insecure cannot be combined with -tls or -ca")
+	case o.tls && o.ca != "":
+		fmt.Fprintln(stderr, "-tls and -ca cannot be combined: -ca already connects with TLS")
 	default:
 		return o, nil
 	}
@@ -100,11 +111,36 @@ func parse(args []string, stderr io.Writer) (options, error) {
 }
 
 func dial(o options, env Env) (*client.Conn, error) {
-	conn, err := client.Dial(o.addr, client.Options{Insecure: o.insecure, DialOptions: env.DialOptions})
+	tlsConfig, err := clientTLS(o)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := client.Dial(o.addr, client.Options{TLS: tlsConfig, Insecure: o.insecure, DialOptions: env.DialOptions})
 	if errors.Is(err, client.ErrPlaintext) {
-		return nil, fmt.Errorf("%w: without TLS the password and token would cross the network in plaintext; pass -insecure to connect anyway", err)
+		return nil, fmt.Errorf("%w: without TLS the password and token would cross the network in plaintext; pass -tls or -ca FILE, or -insecure to connect anyway", err)
 	}
 	return conn, err
+}
+
+// clientTLS returns the TLS configuration the flags ask for, or nil for
+// plaintext.
+func clientTLS(o options) (*tls.Config, error) {
+	switch {
+	case o.ca != "":
+		data, err := os.ReadFile(o.ca)
+		if err != nil {
+			return nil, fmt.Errorf("read CA certificate: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("%s: no PEM certificate", o.ca)
+		}
+		return &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, nil
+	case o.tls:
+		return &tls.Config{MinVersion: tls.VersionTLS13}, nil
+	default:
+		return nil, nil
+	}
 }
 
 func register(ctx context.Context, args []string, env Env) error {

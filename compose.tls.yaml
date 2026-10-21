@@ -1,0 +1,10 @@
+# The server with TLS, on top of compose.yaml; make up-tls runs
+#   docker compose -f compose.yaml -f compose.tls.yaml up --detach --wait --build
+# after writing certs/ if needed.
+services:
+  server:
+    environment:
+      CHAT_TLS_CERT_FILE: /certs/server.pem
+      CHAT_TLS_KEY_FILE: /certs/server.key
+    volumes:
+      - ./certs:/certs:ro

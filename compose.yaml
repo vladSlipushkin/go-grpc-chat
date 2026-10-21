@@ -1,6 +1,27 @@
 name: go-grpc-chat
 
 services:
+  server:
+    build: .
+    image: go-grpc-chat-server
+    environment:
+      # A fixed, public value for local runs only; deployments must set
+      # their own.
+      CHAT_JWT_SECRET: ${CHAT_JWT_SECRET:-insecure-local-development-secret-0123456789}
+      CHAT_LOG_LEVEL: ${CHAT_LOG_LEVEL:-info}
+      CHAT_SHUTDOWN_TIMEOUT: 10s
+    ports:
+      - "127.0.0.1:${CHAT_PORT:-50051}:50051"
+    healthcheck:
+      test: ["CMD", "server", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    # Longer than CHAT_SHUTDOWN_TIMEOUT: the server finishes its own
+    # graceful shutdown before Docker falls back to SIGKILL (ADR-0012).
+    stop_grace_period: 15s
+
   postgres:
     image: postgres:18-alpine
     environment:

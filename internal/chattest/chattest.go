@@ -5,8 +5,11 @@ package chattest
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,20 +17,29 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
 	authv1 "github.com/vladSlipushkin/go-grpc-chat/gen/auth/v1"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/app"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/certtest"
 )
 
 // Target is the address clients dial; DialOptions route it to the server.
-const Target = "passthrough:///chattest"
+// Its host, and so the name a TLS client checks, is Host.
+const Target = "passthrough:///" + Host
+
+// Host is the server's name in Target.
+const Host = "chattest"
 
 // Options configures Start.
 type Options struct {
 	// TokenTTL is how long access tokens stay valid; zero means an hour.
 	TokenTTL time.Duration
+	// TLS, if it has a certificate, makes the server serve only TLS with
+	// it; the certificate must be valid for Host.
+	TLS certtest.Files
 }
 
 // Server is a running chat server. The token secret survives Restart, so
@@ -38,6 +50,7 @@ type Server struct {
 	// are reported to it, since a subtest that restarted it may be over.
 	tb   testing.TB
 	opts app.Options
+	tls  certtest.Files
 
 	lis  atomic.Pointer[bufconn.Listener]
 	mu   sync.Mutex
@@ -52,12 +65,14 @@ func Start(tb testing.TB, opts Options) *Server {
 	if ttl == 0 {
 		ttl = time.Hour
 	}
-	s := &Server{tb: tb, opts: app.Options{
+	s := &Server{tb: tb, tls: opts.TLS, opts: app.Options{
 		JWTSecret: []byte("chattest-secret-0123456789abcdef"),
 		TokenTTL:  ttl,
 		// The minimum cost keeps registration and login fast (ADR-0002).
 		BcryptCost:      bcrypt.MinCost,
 		ShutdownTimeout: time.Second,
+		TLSCertFile:     opts.TLS.Cert,
+		TLSKeyFile:      opts.TLS.Key,
 	}}
 	s.serve()
 	tb.Cleanup(s.Stop)
@@ -108,11 +123,33 @@ func (s *Server) Stop() {
 	stop()
 }
 
+// ClientTLS returns a TLS configuration that trusts the server's CA, or
+// nil if the server serves plaintext.
+func (s *Server) ClientTLS(tb testing.TB) *tls.Config {
+	tb.Helper()
+	if s.tls.CA == "" {
+		return nil
+	}
+	data, err := os.ReadFile(s.tls.CA)
+	if err != nil {
+		tb.Fatalf("read CA: %v", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(data) {
+		tb.Fatalf("no certificate in %s", s.tls.CA)
+	}
+	return &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}
+}
+
 // Register creates an account through the server's API.
 func (s *Server) Register(tb testing.TB, username, password string) {
 	tb.Helper()
 
-	opts := append(s.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if cfg := s.ClientTLS(tb); cfg != nil {
+		creds = credentials.NewTLS(cfg)
+	}
+	opts := append(s.DialOptions(), grpc.WithTransportCredentials(creds))
 	conn, err := grpc.NewClient(Target, opts...)
 	if err != nil {
 		tb.Fatalf("NewClient() error = %v", err)

@@ -3,7 +3,7 @@
 #
 # Requires: Go 1.27, Docker, golangci-lint v2.14.0 (same version as CI).
 
-GO_IMAGE ?= golang:1.27.2
+GO_IMAGE ?= golang:1.27.3
 BIN_DIR  ?= bin
 
 # Development tools are pinned in a separate module so their dependencies
@@ -37,8 +37,11 @@ Usage: make TARGET
   check           lint, proto-lint, tidy-check, race tests and vulnerability scan
   build           build binaries into $(BIN_DIR)/
   run             run the server locally with reflection and a dev JWT secret
-  up              start local infrastructure and wait until healthy
-  down            stop local infrastructure
+  certs           write development TLS certificates into certs/
+  up              build and start the server and Postgres in Docker, wait until healthy
+  up-tls          the same with the server on TLS (makes certs if missing)
+  down            stop the containers
+  demo            record docs/demo.gif with VHS in Docker
 endef
 
 # Printed by make itself: echo keeps spacing in cmd.exe but collapses it in sh.
@@ -105,10 +108,30 @@ run: export CHAT_JWT_SECRET ?= insecure-local-development-secret-0123456789
 run:
 	go run ./cmd/server
 
+# Development certificates for trying TLS; see tools/devcert.
+DEVCERT = go -C tools run ./devcert -dir ../certs
+
+.PHONY: certs
+certs:
+	$(DEVCERT)
+
+certs/server.pem:
+	$(DEVCERT)
+
 .PHONY: up
 up:
-	docker compose up --detach --wait
+	docker compose up --detach --wait --build
+
+# The server with TLS, using the certificates from make certs.
+.PHONY: up-tls
+up-tls: certs/server.pem
+	docker compose -f compose.yaml -f compose.tls.yaml up --detach --wait --build
 
 .PHONY: down
 down:
 	docker compose down
+
+.PHONY: demo
+demo:
+	docker build -f docs/demo/Dockerfile -t go-grpc-chat-demo .
+	docker run --rm --mount type=bind,src=$(CURDIR),dst=/vhs go-grpc-chat-demo docs/demo/demo.tape

@@ -23,6 +23,7 @@ import (
 
 	authv1 "github.com/vladSlipushkin/go-grpc-chat/gen/auth/v1"
 	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/certtest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chattest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/cli"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/client"
@@ -218,6 +219,19 @@ func (s *refusingServer) Connect(stream chatv1.ChatService_ConnectServer) error 
 	}
 }
 
+func TestTLS(t *testing.T) {
+	t.Parallel()
+
+	files := certtest.SelfSigned(t, chattest.Host)
+	srv := chattest.Start(t, chattest.Options{TLS: files})
+	register(t, srv, "alice")
+	alice := openWith(t, srv.DialOptions(), []string{"-ca", files.CA}, "alice", password)
+	alice.typeLine(t, "/join general")
+	alice.waitFor(t, "-- joined general --")
+	alice.typeLine(t, "hello")
+	alice.waitFor(t, "[general] alice: hello")
+}
+
 func TestRefusesPlaintextToRemoteAddress(t *testing.T) {
 	t.Parallel()
 
@@ -246,6 +260,8 @@ func TestUsage(t *testing.T) {
 	}{
 		{name: "no user", args: nil, wantErr: cli.ErrUsage, wantStderr: "-user is required"},
 		{name: "extra argument", args: []string{"-user", "alice", "now"}, wantErr: cli.ErrUsage, wantStderr: `unexpected argument "now"`},
+		{name: "TLS and insecure", args: []string{"-user", "alice", "-tls", "-insecure"}, wantErr: cli.ErrUsage, wantStderr: "-insecure cannot be combined with -tls or -ca"},
+		{name: "TLS and CA", args: []string{"-user", "alice", "-tls", "-ca", "ca.pem"}, wantErr: cli.ErrUsage, wantStderr: "-tls and -ca cannot be combined"},
 		{name: "unknown flag", args: []string{"register", "-name", "alice"}, wantErr: cli.ErrUsage, wantStderr: "flag provided but not defined: -name"},
 		{name: "help", args: []string{"-h"}, wantErr: flag.ErrHelp, wantStderr: "chat register -user NAME"},
 	}
@@ -325,7 +341,7 @@ type terminal struct {
 // passwords in order.
 func open(t *testing.T, srv *chattest.Server, name string, passwords ...string) *terminal {
 	t.Helper()
-	return openWith(t, srv.DialOptions(), name, passwords...)
+	return openWith(t, srv.DialOptions(), []string{"-insecure"}, name, passwords...)
 }
 
 // fakeServer is a server written for a test, implementing both services.
@@ -353,17 +369,19 @@ func openFake(t *testing.T, impl fakeServer, name string, passwords ...string) *
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)
 	})
-	return openWith(t, []grpc.DialOption{dialer}, name, passwords...)
+	return openWith(t, []grpc.DialOption{dialer}, []string{"-insecure"}, name, passwords...)
 }
 
-func openWith(t *testing.T, dialOpts []grpc.DialOption, name string, passwords ...string) *terminal {
+// openWith runs the chat command for name with the transport flags given.
+func openWith(t *testing.T, dialOpts []grpc.DialOption, transport []string, name string, passwords ...string) *terminal {
 	t.Helper()
 
 	stdin, in := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	term := &terminal{in: in, out: &lockedBuffer{}, cancel: cancel, result: make(chan error, 1)}
 	go func() {
-		term.result <- cli.Run(ctx, []string{"-user", name, "-addr", chattest.Target, "-insecure"}, cli.Env{
+		args := append([]string{"-user", name, "-addr", chattest.Target}, transport...)
+		term.result <- cli.Run(ctx, args, cli.Env{
 			Stdin:        stdin,
 			Stdout:       term.out,
 			Stderr:       term.out,

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -27,7 +29,15 @@ type Config struct {
 	JWTSecret []byte
 	// TokenTTL is how long an access token stays valid.
 	TokenTTL time.Duration
+	// TLSCertFile and TLSKeyFile are PEM files with the server's
+	// certificate, followed by any intermediates, and its private key.
+	// Both are set or neither; without them the server serves plaintext.
+	TLSCertFile, TLSKeyFile string
 }
+
+// defaultGRPCAddr is where the server listens unless CHAT_GRPC_ADDR says
+// otherwise.
+const defaultGRPCAddr = ":50051"
 
 // LookupFunc reports the value of an environment variable and whether it is
 // set. os.LookupEnv satisfies it.
@@ -37,7 +47,7 @@ type LookupFunc func(key string) (string, bool)
 // variables. It reports every invalid variable at once.
 func Load(lookup LookupFunc) (Config, error) {
 	cfg := Config{
-		GRPCAddr:        ":50051",
+		GRPCAddr:        defaultGRPCAddr,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: 10 * time.Second,
 		TokenTTL:        time.Hour,
@@ -88,10 +98,44 @@ func Load(lookup LookupFunc) (Config, error) {
 		cfg.Reflection = b
 	}
 
+	cfg.TLSCertFile, _ = lookup("CHAT_TLS_CERT_FILE")
+	cfg.TLSKeyFile, _ = lookup("CHAT_TLS_KEY_FILE")
+	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
+		errs = append(errs, errors.New("CHAT_TLS_CERT_FILE and CHAT_TLS_KEY_FILE: set both or neither"))
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// Healthcheck is what the health check needs to reach the server it runs
+// next to.
+type Healthcheck struct {
+	// Addr is the server's address as seen from its own host.
+	Addr string
+	// TLSCertFile is the server's certificate file, empty without TLS.
+	TLSCertFile string
+}
+
+// LoadHealthcheck reads, from the server's own environment, where the
+// server listens and whether it serves TLS. It needs no secrets.
+func LoadHealthcheck(lookup LookupFunc) (Healthcheck, error) {
+	addr := defaultGRPCAddr
+	if v, ok := lookup("CHAT_GRPC_ADDR"); ok {
+		addr = v
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return Healthcheck{}, fmt.Errorf("CHAT_GRPC_ADDR: %w", err)
+	}
+	// A server listening on every address is reached on loopback.
+	if ip, err := netip.ParseAddr(host); host == "" || (err == nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	cert, _ := lookup("CHAT_TLS_CERT_FILE")
+	return Healthcheck{Addr: net.JoinHostPort(host, port), TLSCertFile: cert}, nil
 }
 
 func positiveDuration(s string) (time.Duration, error) {

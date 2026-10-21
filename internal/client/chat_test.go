@@ -232,18 +232,42 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 func TestChatCloseBeforeRun(t *testing.T) {
 	t.Parallel()
 
-	conn := startFake(t, silentServer{})
-	chat := conn.NewChat("token", client.ChatOptions{})
-	if err := chat.Close(ctxFor(t)); !errors.Is(err, client.ErrNotRunning) {
-		t.Errorf("Close() before Run = %v, want ErrNotRunning", err)
-	}
-	go func() {
-		for range chat.Events() {
+	t.Run("run starts", func(t *testing.T) {
+		t.Parallel()
+
+		// As when Run is started on a goroutine that has not run yet.
+		chat := startFake(t, silentServer{}).NewChat("token", client.ChatOptions{})
+		closed := make(chan error, 1)
+		go func() { closed <- chat.Close(ctxFor(t)) }()
+		go func() {
+			for range chat.Events() {
+			}
+		}()
+		if err := chat.Run(ctxFor(t)); err != nil {
+			t.Errorf("Run() = %v, want nil", err)
 		}
-	}()
-	if err := chat.Run(ctxFor(t)); err != nil {
-		t.Errorf("Run() after Close = %v, want nil at once", err)
-	}
+		if err := <-closed; err != nil {
+			t.Errorf("Close() = %v, want nil once Run has started", err)
+		}
+	})
+	t.Run("run never starts", func(t *testing.T) {
+		t.Parallel()
+
+		chat := startFake(t, silentServer{}).NewChat("token", client.ChatOptions{})
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		err := chat.Close(ctx)
+		if !errors.Is(err, client.ErrNotRunning) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Close() without Run = %v, want ErrNotRunning and DeadlineExceeded", err)
+		}
+		go func() {
+			for range chat.Events() {
+			}
+		}()
+		if err := chat.Run(ctxFor(t)); err != nil {
+			t.Errorf("Run() after Close = %v, want nil at once", err)
+		}
+	})
 }
 
 func TestChatCloseGivesUpAtDeadline(t *testing.T) {
@@ -529,7 +553,9 @@ func (s recordingStream) SendMsg(m any) error {
 func TestChatBackoffGrowsUntilAStreamLasts(t *testing.T) {
 	t.Parallel()
 
-	const minBackoff, maxBackoff = 10 * time.Millisecond, 200 * time.Millisecond
+	// A short stream must end well within maxBackoff, even on a slow
+	// machine under -race.
+	const minBackoff, maxBackoff = 10 * time.Millisecond, time.Second
 	// Streams end at once except the fourth, which outlives the longest
 	// wait and so shows the server is back to normal.
 	srv := &flappingServer{last: func(n int) time.Duration {
@@ -630,7 +656,7 @@ func (s *refusingServer) Connect(stream chatv1.ChatService_ConnectServer) error 
 		if !first && req.GetJoinRoom().GetRoomId() == s.refuse {
 			resp = &chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Error{Error: &chatv1.Error{
 				RequestId: req.GetRequestId(),
-				Status:    roomLimit(),
+				Status:    roomLimitStatus,
 			}}}
 		}
 		if err := stream.Send(resp); err != nil {
@@ -639,7 +665,9 @@ func (s *refusingServer) Connect(stream chatv1.ChatService_ConnectServer) error 
 	}
 }
 
-func roomLimit() *spb.Status {
+var roomLimitStatus = mustRoomLimit()
+
+func mustRoomLimit() *spb.Status {
 	st, err := status.New(codes.ResourceExhausted, "room limit reached").WithDetails(
 		&errdetails.ErrorInfo{Reason: client.ReasonRoomLimit, Domain: "chat.v1"},
 	)

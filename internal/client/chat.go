@@ -25,7 +25,8 @@ var (
 	// ErrClosed reports a request made after Close was called or Run
 	// returned.
 	ErrClosed = errors.New("chat closed")
-	// ErrNotRunning reports a Close before Run was called.
+	// ErrNotRunning reports a Close whose context ended before Run was
+	// called.
 	ErrNotRunning = errors.New("chat not running")
 	// ErrNotConnected reports a request that gave up waiting for a
 	// reconnect.
@@ -77,6 +78,7 @@ type Chat struct {
 	events   chan Event
 	quit     chan struct{} // closed when the session is to end
 	quitOnce sync.Once
+	started  chan struct{} // closed when Run starts
 	done     chan struct{} // closed when Run returns
 
 	// sendMu serializes Send and CloseSend: gRPC allows one sender at a
@@ -88,7 +90,6 @@ type Chat struct {
 	ready     chan struct{} // closed once stream is open and rooms rejoined
 	isReady   bool
 	closing   bool
-	running   bool
 	nextID    uint64
 	pending   map[string]pending
 	rooms     map[string]bool // rooms the server has acknowledged joining
@@ -119,6 +120,7 @@ func (c *Conn) NewChat(token string, opts ChatOptions) *Chat {
 		backoff: b,
 		events:  make(chan Event),
 		quit:    make(chan struct{}),
+		started: make(chan struct{}),
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
 		pending: make(map[string]pending),
@@ -182,9 +184,15 @@ func (c *Chat) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.mu.Lock()
-	c.running = true
+	closing := c.closing
 	c.cancelRun = cancel
 	c.mu.Unlock()
+	close(c.started)
+	// A Close that came first is waiting for Run to start, or has given
+	// up: either way there is nothing to serve.
+	if closing {
+		return nil
+	}
 
 	token := c.token
 	attempt := 0
@@ -511,17 +519,25 @@ func (c *Chat) detach(stream chatStream) {
 // requests, waits for the replies to those already sent, half-closes the
 // stream and waits for the server to end it. If ctx ends first, it cancels
 // the stream instead. Events must still be read meanwhile. Run returns
-// before Close does. Close may be called more than once. Before Run, it
-// only makes a later Run return at once, and returns ErrNotRunning.
+// before Close does. Close may be called more than once.
+//
+// Close may come first when Run is started on another goroutine. It then
+// waits for Run to start, which returns at once. If ctx ends before that,
+// Close returns ErrNotRunning, and a later Run returns at once.
 func (c *Chat) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closing = true
-	running := c.running
 	c.mu.Unlock()
-	if !running {
-		// Nothing would ever close c.done.
-		c.stop()
-		return ErrNotRunning
+	select {
+	case <-c.started:
+	case <-ctx.Done():
+		select {
+		case <-c.started:
+		default:
+			// A Run that starts from now on sees closing.
+			c.stop()
+			return fmt.Errorf("close chat: %w: %w", ErrNotRunning, ctx.Err())
+		}
 	}
 
 	answered := make(chan struct{})

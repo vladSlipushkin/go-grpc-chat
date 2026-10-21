@@ -183,11 +183,13 @@ func (c *Chat) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Under the lock, so that a Close either sees Run started or is seen
+	// by it.
 	c.mu.Lock()
 	closing := c.closing
 	c.cancelRun = cancel
-	c.mu.Unlock()
 	close(c.started)
+	c.mu.Unlock()
 	// A Close that came first is waiting for Run to start, or has given
 	// up: either way there is nothing to serve.
 	if closing {
@@ -522,8 +524,9 @@ func (c *Chat) detach(stream chatStream) {
 // before Close does. Close may be called more than once.
 //
 // Close may come first when Run is started on another goroutine. It then
-// waits for Run to start, which returns at once. If ctx ends before that,
-// Close returns ErrNotRunning, and a later Run returns at once.
+// waits for Run to be called, until ctx ends, and that Run returns at once.
+// If ctx ends first, Close returns ErrNotRunning, and a later Run returns at
+// once.
 func (c *Chat) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closing = true

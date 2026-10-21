@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"time"
 
@@ -270,9 +271,12 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 	}
 }
 
-// untilToken returns how long after now limiter has a whole token again.
+// untilToken returns how long after now limiter has a whole token again,
+// rounded up and at least a millisecond, so RetryInfo never says to retry
+// at once.
 func untilToken(limiter *rate.Limiter, now time.Time) time.Duration {
-	return time.Duration((1 - limiter.TokensAt(now)) * float64(messageInterval))
+	wait := time.Duration(math.Ceil((1 - limiter.TokensAt(now)) * float64(messageInterval)))
+	return max(wait, time.Millisecond)
 }
 
 // rateLimited reports a message sent too fast, with how long to wait.

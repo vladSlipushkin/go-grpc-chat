@@ -16,6 +16,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"go.uber.org/goleak"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -116,7 +118,7 @@ func TestChatRejoinsAfterSlowClient(t *testing.T) {
 	// relayed into buffers, so they keep up with the room.
 	const sent, perSender = 200, 5
 	for start := 0; start < sent; start += perSender {
-		sender := connect(t, srv, fmt.Sprintf("sender-%d", start), options{})
+		sender := connect(t, srv, fmt.Sprintf("sender_%d", start), options{})
 		sender.join(t, "general")
 		for i := start; i < start+perSender; i++ {
 			sender.say(t, fmt.Sprintf("%03d%s", i, strings.Repeat("x", 4000)))
@@ -224,6 +226,82 @@ func TestChatCloseWaitsForReplies(t *testing.T) {
 	}
 	if delivered != acked {
 		t.Errorf("bob got %d of alice's messages, want the %d she had acknowledged", delivered, acked)
+	}
+}
+
+func TestChatCloseBeforeRun(t *testing.T) {
+	t.Parallel()
+
+	conn := startFake(t, silentServer{})
+	chat := conn.NewChat("token", client.ChatOptions{})
+	if err := chat.Close(ctxFor(t)); !errors.Is(err, client.ErrNotRunning) {
+		t.Errorf("Close() before Run = %v, want ErrNotRunning", err)
+	}
+	go func() {
+		for range chat.Events() {
+		}
+	}()
+	if err := chat.Run(ctxFor(t)); err != nil {
+		t.Errorf("Run() after Close = %v, want nil at once", err)
+	}
+}
+
+func TestChatCloseGivesUpAtDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		srv      chatv1.ChatServiceServer
+		inFlight bool // a Send is waiting for its reply when Close starts
+	}{
+		// gRPC lets a server go on after the client half-closes.
+		{name: "server ignores half-close", srv: stubbornServer{}},
+		{name: "request never answered", srv: silentServer{}, inFlight: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			onStream := make(chan struct{}, 1)
+			conn := startFake(t, tt.srv, recordSends(func(*chatv1.ConnectRequest) { onStream <- struct{}{} }))
+			u := start(t, "alice", conn.NewChat("token", client.ChatOptions{}), true)
+			waitFor[client.Connected](t, u)
+			sent := make(chan error, 1)
+			if tt.inFlight {
+				go func() { sent <- u.chat.Send(ctxFor(t), "general", "hello?") }()
+				// Close refuses requests that have not reached the stream.
+				<-onStream
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			if err := u.chat.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Close() = %v, want DeadlineExceeded", err)
+			}
+			if tt.inFlight {
+				// The stream was cancelled under it.
+				if err := <-sent; !errors.Is(err, client.ErrConnectionLost) {
+					t.Errorf("Send() cut short by Close = %v, want ErrConnectionLost", err)
+				}
+			}
+		})
+	}
+}
+
+// stubbornServer acknowledges nothing and keeps the stream open after the
+// client half-closes it, until the client cancels.
+type stubbornServer struct {
+	chatv1.UnimplementedChatServiceServer
+}
+
+func (stubbornServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	for {
+		if _, err := stream.Recv(); errors.Is(err, io.EOF) {
+			<-stream.Context().Done()
+			return stream.Context().Err()
+		} else if err != nil {
+			return err
+		}
 	}
 }
 
@@ -387,6 +465,190 @@ func TestChatResendsJoinAndLeaveButNotSend(t *testing.T) {
 	}
 }
 
+// TestChatResendLeavesSentRequestAlone checks the contract of SendMsg: a
+// message may not be modified once it has been sent, since stats handlers
+// and interceptors may still hold it.
+func TestChatResendLeavesSentRequestAlone(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		sent []sentRequest
+	)
+	conn := startFake(t, &breakingServer{}, recordSends(func(req *chatv1.ConnectRequest) {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, sentRequest{req: req, id: req.GetRequestId()})
+	}))
+	chat := conn.NewChat("token", client.ChatOptions{MinBackoff: time.Millisecond, MaxBackoff: 10 * time.Millisecond})
+	u := start(t, "alice", chat, true)
+	u.join(t, "general")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 2 {
+		t.Fatalf("sent %d requests, want the join and its resend", len(sent))
+	}
+	for i, s := range sent {
+		if got := s.req.GetRequestId(); got != s.id {
+			t.Errorf("request %d has request_id %q, want %q as sent", i, got, s.id)
+		}
+	}
+	if sent[0].req == sent[1].req {
+		t.Error("the resend reused the message already sent")
+	}
+}
+
+type sentRequest struct {
+	req *chatv1.ConnectRequest
+	id  string // request_id at the time it was sent
+}
+
+// recordSends calls record with every request the client sends, before
+// gRPC takes it.
+func recordSends(record func(*chatv1.ConnectRequest)) grpc.DialOption {
+	return grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		cs, err := streamer(ctx, desc, cc, method, opts...)
+		return recordingStream{ClientStream: cs, record: record}, err
+	})
+}
+
+// recordingStream reports every request sent on a stream.
+type recordingStream struct {
+	grpc.ClientStream
+	record func(*chatv1.ConnectRequest)
+}
+
+func (s recordingStream) SendMsg(m any) error {
+	if req, ok := m.(*chatv1.ConnectRequest); ok {
+		s.record(req)
+	}
+	return s.ClientStream.SendMsg(m)
+}
+
+func TestChatBackoffGrowsUntilAStreamLasts(t *testing.T) {
+	t.Parallel()
+
+	const minBackoff, maxBackoff = 10 * time.Millisecond, 200 * time.Millisecond
+	// Streams end at once except the fourth, which outlives the longest
+	// wait and so shows the server is back to normal.
+	srv := &flappingServer{last: func(n int) time.Duration {
+		if n == 4 {
+			return 2 * maxBackoff
+		}
+		return 0
+	}}
+	conn := startFake(t, srv)
+	chat := conn.NewChat("token", client.ChatOptions{MinBackoff: minBackoff, MaxBackoff: maxBackoff})
+	u := start(t, "alice", chat, true)
+
+	// The ceiling of each wait; the wait itself is between half of it and
+	// all of it.
+	ceilings := []time.Duration{
+		minBackoff, 2 * minBackoff, 4 * minBackoff,
+		// The fourth stream lasted: the count starts again.
+		minBackoff, 2 * minBackoff,
+	}
+	for i, ceiling := range ceilings {
+		d := waitFor[client.Disconnected](t, u)
+		if d.RetryIn < ceiling/2 || d.RetryIn > ceiling {
+			t.Errorf("wait after stream %d = %v, want within [%v, %v]", i+1, d.RetryIn, ceiling/2, ceiling)
+		}
+	}
+}
+
+// flappingServer answers on each stream at once, as a server acknowledging
+// a rejoin would, and ends stream n with UNAVAILABLE after last(n), counted
+// from 1.
+type flappingServer struct {
+	chatv1.UnimplementedChatServiceServer
+	last func(n int) time.Duration
+
+	streams atomic.Int32
+}
+
+func (s *flappingServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	n := int(s.streams.Add(1))
+	// An event this client does not know: a reply all the same.
+	if err := stream.Send(&chatv1.ConnectResponse{}); err != nil {
+		return err
+	}
+	select {
+	case <-time.After(s.last(n)):
+		return status.Error(codes.Unavailable, "flapping")
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
+}
+
+func TestChatReportsRoomsNotRejoined(t *testing.T) {
+	t.Parallel()
+
+	conn := startFake(t, &refusingServer{refuse: "random"})
+	u := start(t, "alice", conn.NewChat("token", client.ChatOptions{MinBackoff: time.Millisecond, MaxBackoff: 10 * time.Millisecond}), true)
+	u.join(t, "general")
+	u.join(t, "random")
+	// The first stream breaks on a send; the rejoin on the next is half
+	// refused.
+	if err := u.chat.Send(ctxFor(t), "general", "hi"); !errors.Is(err, client.ErrConnectionLost) {
+		t.Fatalf("Send() = %v, want ErrConnectionLost", err)
+	}
+	waitFor[client.Connected](t, u) // the first stream
+	want := client.Connected{Rooms: []string{"general"}, Dropped: []string{"random"}}
+	if diff := cmp.Diff(want, waitFor[client.Connected](t, u)); diff != "" {
+		t.Errorf("Connected after the rejoin mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"general"}, u.chat.Rooms()); diff != "" {
+		t.Errorf("Rooms() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// refusingServer acknowledges joins on the first stream and ends it on the
+// first message without replying. On later streams it refuses to join
+// refuse, as a server at its room limit would, and acknowledges the rest.
+type refusingServer struct {
+	chatv1.UnimplementedChatServiceServer
+	refuse string
+
+	streams atomic.Int32
+}
+
+func (s *refusingServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	first := s.streams.Add(1) == 1
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if first && req.GetSendMessage() != nil {
+			return status.Error(codes.Unavailable, "going down")
+		}
+		resp := &chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Ack{Ack: &chatv1.Ack{RequestId: req.GetRequestId()}}}
+		if !first && req.GetJoinRoom().GetRoomId() == s.refuse {
+			resp = &chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Error{Error: &chatv1.Error{
+				RequestId: req.GetRequestId(),
+				Status:    roomLimit(),
+			}}}
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}
+
+func roomLimit() *spb.Status {
+	st, err := status.New(codes.ResourceExhausted, "room limit reached").WithDetails(
+		&errdetails.ErrorInfo{Reason: client.ReasonRoomLimit, Domain: "chat.v1"},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return st.Proto()
+}
+
 // breakingServer ends the first stream on its first request without
 // replying, as a server that goes down at that moment would, and
 // acknowledges everything on later streams.
@@ -476,7 +738,7 @@ func (silentServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 
 // startFake serves impl, a chat service written for the test, and returns
 // a connection to it.
-func startFake(t *testing.T, impl chatv1.ChatServiceServer) *client.Conn {
+func startFake(t *testing.T, impl chatv1.ChatServiceServer, opts ...grpc.DialOption) *client.Conn {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
@@ -493,9 +755,9 @@ func startFake(t *testing.T, impl chatv1.ChatServiceServer) *client.Conn {
 
 	conn, err := client.Dial("passthrough:///fake", client.Options{
 		Insecure: true,
-		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		DialOptions: append([]grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
-		})},
+		})}, opts...),
 	})
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
@@ -507,6 +769,7 @@ func startFake(t *testing.T, impl chatv1.ChatServiceServer) *client.Conn {
 	})
 	return conn
 }
+
 func TestDialRefusesPlaintextToRemoteAddress(t *testing.T) {
 	t.Parallel()
 

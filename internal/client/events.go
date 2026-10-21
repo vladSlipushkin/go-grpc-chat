@@ -42,9 +42,11 @@ type Disconnected struct {
 }
 
 // Connected reports a stream that is open, with Rooms joined on it. After
-// a reconnect, rooms the server refused to join again are missing.
+// a reconnect, Dropped lists the rooms the server refused to join again;
+// they are no longer joined.
 type Connected struct {
-	Rooms []string
+	Rooms   []string
+	Dropped []string
 }
 
 func (Message) event()      {}

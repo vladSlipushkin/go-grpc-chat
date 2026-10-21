@@ -6,13 +6,23 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/goleak"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	authv1 "github.com/vladSlipushkin/go-grpc-chat/gen/auth/v1"
+	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/chattest"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/cli"
 	"github.com/vladSlipushkin/go-grpc-chat/internal/client"
@@ -145,6 +155,69 @@ func TestLoginAgainAfterTokenExpiry(t *testing.T) {
 	alice.waitFor(t, "[general] alice: back")
 }
 
+func TestCurrentRoomNotRejoined(t *testing.T) {
+	t.Parallel()
+
+	alice := openFake(t, &refusingServer{refuse: "general"}, "alice", password)
+	alice.typeLine(t, "/join general")
+	alice.waitFor(t, "-- joined general --")
+	// The stream breaks on the message; the next one refuses general.
+	alice.typeLine(t, "hello")
+	alice.waitFor(t, "-- reconnected --\n-- could not rejoin general --")
+	alice.typeLine(t, "again")
+	alice.waitFor(t, "-- not sent: no longer in general; /join general --")
+	alice.typeLine(t, "/rooms")
+	alice.waitFor(t, "-- no rooms; /join ROOM --")
+}
+
+// refusingServer logs anyone in. On its first chat stream it acknowledges
+// joins and ends the stream on the first message without replying; on
+// later streams it refuses to join refuse, as a server at its room limit
+// would, and acknowledges the rest.
+type refusingServer struct {
+	authv1.UnimplementedAuthServiceServer
+	chatv1.UnimplementedChatServiceServer
+	refuse string
+
+	streams atomic.Int32
+}
+
+func (*refusingServer) Login(context.Context, *authv1.LoginRequest) (*authv1.LoginResponse, error) {
+	return &authv1.LoginResponse{AccessToken: "token", ExpiresAt: timestamppb.New(time.Now().Add(time.Hour))}, nil
+}
+
+func (s *refusingServer) Connect(stream chatv1.ChatService_ConnectServer) error {
+	first := s.streams.Add(1) == 1
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if first && req.GetSendMessage() != nil {
+			return status.Error(codes.Unavailable, "going down")
+		}
+		resp := &chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Ack{Ack: &chatv1.Ack{RequestId: req.GetRequestId()}}}
+		if !first && req.GetJoinRoom().GetRoomId() == s.refuse {
+			st, err := status.New(codes.ResourceExhausted, "room limit reached").WithDetails(
+				&errdetails.ErrorInfo{Reason: client.ReasonRoomLimit, Domain: "chat.v1"},
+			)
+			if err != nil {
+				return err
+			}
+			resp = &chatv1.ConnectResponse{Event: &chatv1.ConnectResponse_Error{Error: &chatv1.Error{
+				RequestId: req.GetRequestId(),
+				Status:    st.Proto(),
+			}}}
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}
+
 func TestRefusesPlaintextToRemoteAddress(t *testing.T) {
 	t.Parallel()
 
@@ -252,6 +325,39 @@ type terminal struct {
 // passwords in order.
 func open(t *testing.T, srv *chattest.Server, name string, passwords ...string) *terminal {
 	t.Helper()
+	return openWith(t, srv.DialOptions(), name, passwords...)
+}
+
+// fakeServer is a server written for a test, implementing both services.
+type fakeServer interface {
+	authv1.AuthServiceServer
+	chatv1.ChatServiceServer
+}
+
+// openFake runs the chat command for name against impl.
+func openFake(t *testing.T, impl fakeServer, name string, passwords ...string) *terminal {
+	t.Helper()
+
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer()
+	authv1.RegisterAuthServiceServer(gs, impl)
+	chatv1.RegisterChatServiceServer(gs, impl)
+	served := make(chan error, 1)
+	go func() { served <- gs.Serve(lis) }()
+	t.Cleanup(func() {
+		gs.Stop()
+		if err := <-served; err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	})
+	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		return lis.DialContext(ctx)
+	})
+	return openWith(t, []grpc.DialOption{dialer}, name, passwords...)
+}
+
+func openWith(t *testing.T, dialOpts []grpc.DialOption, name string, passwords ...string) *terminal {
+	t.Helper()
 
 	stdin, in := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -262,7 +368,7 @@ func open(t *testing.T, srv *chattest.Server, name string, passwords ...string) 
 			Stdout:       term.out,
 			Stderr:       term.out,
 			ReadPassword: passwordsFor(t, passwords),
-			DialOptions:  srv.DialOptions(),
+			DialOptions:  dialOpts,
 		})
 	}()
 	// Registered after the server's cleanup, so it runs first.

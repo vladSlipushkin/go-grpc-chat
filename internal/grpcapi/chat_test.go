@@ -500,6 +500,80 @@ func TestChatRateLimitsMessages(t *testing.T) {
 	})
 }
 
+// TestChatRateLimitIsPerUser runs in a synctest bubble, where no time
+// passes unless the test sleeps, so no token refills between requests.
+func TestChatRateLimitIsPerUser(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		hub := chat.NewHub(logger)
+		defer hub.Close()
+		srv := grpcapi.NewChatServer(hub, nil, logger)
+
+		alice := auth.Claims{UserID: "id-alice", Username: "alice"}
+		open := func(claims auth.Claims) (*pipeStream, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(auth.NewContext(t.Context(), claims))
+			s := connectPipe(ctx, srv)
+			if got := s.request(t, joinRoom("j", "general")); got.GetAck() == nil {
+				t.Fatalf("reply to join = %v, want an Ack", got)
+			}
+			return s, cancel
+		}
+		post := func(s *pipeStream, id string) *chatv1.ConnectResponse {
+			return s.request(t, sendMessage(id, "general", "hi"))
+		}
+		wantLimited := func(s *pipeStream, id string) {
+			t.Helper()
+			want := reply{requestID: id, code: codes.ResourceExhausted, reason: "RATE_LIMITED"}
+			if diff := cmp.Diff(want, summarize(t, post(s, id)), cmp.AllowUnexported(reply{})); diff != "" {
+				t.Errorf("reply to %s mismatch (-want +got):\n%s", id, diff)
+			}
+		}
+
+		first, closeFirst := open(alice)
+		second, closeSecond := open(alice)
+		for i := range grpcapi.MessageBurst {
+			if got := post(first, fmt.Sprint(i)); got.GetAck() == nil {
+				t.Fatalf("reply to message %d of the burst = %v, want an Ack", i, got)
+			}
+		}
+		// The second stream draws on the allowance the first has spent.
+		wantLimited(second, "second stream")
+
+		// Another user has an allowance of their own.
+		bob, closeBob := open(auth.Claims{UserID: "id-bob", Username: "bob"})
+		if got := post(bob, "bob"); got.GetAck() == nil {
+			t.Errorf("bob's reply = %v, want an Ack", got)
+		}
+
+		// The allowance outlives the stream that spent it while another of
+		// the user's streams is open.
+		closeFirst()
+		assertStatus(t, <-first.done, codes.Canceled, "")
+		third, closeThird := open(alice)
+		wantLimited(third, "third stream")
+
+		// With the last stream gone, the next one starts with a full burst.
+		closeSecond()
+		closeThird()
+		assertStatus(t, <-second.done, codes.Canceled, "")
+		assertStatus(t, <-third.done, codes.Canceled, "")
+		fresh, closeFresh := open(alice)
+		if got := post(fresh, "fresh"); got.GetAck() == nil {
+			t.Errorf("reply on a stream opened after the others closed = %v, want an Ack", got)
+		}
+
+		closeFresh()
+		closeBob()
+		assertStatus(t, <-fresh.done, codes.Canceled, "")
+		assertStatus(t, <-bob.done, codes.Canceled, "")
+		if n := grpcapi.LimitedUsers(srv); n != 0 {
+			t.Errorf("limiters kept after every stream closed: %d, want 0", n)
+		}
+	})
+}
+
 // pipeStream is a fake stream driven one request at a time from inside a
 // synctest bubble.
 type pipeStream struct {

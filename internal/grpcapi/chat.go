@@ -30,6 +30,7 @@ type ChatServer struct {
 	chatv1.UnimplementedChatServiceServer
 
 	hub      *chat.Hub
+	limiters *userLimiters
 	shutdown <-chan struct{}
 	logger   *slog.Logger
 }
@@ -39,19 +40,11 @@ type ChatServer struct {
 // ends with UNAVAILABLE; graceful stop alone would wait for clients to hang
 // up (ADR-0006). A nil shutdown never fires.
 func NewChatServer(hub *chat.Hub, shutdown <-chan struct{}, logger *slog.Logger) *ChatServer {
-	return &ChatServer{hub: hub, shutdown: shutdown, logger: logger}
+	return &ChatServer{hub: hub, limiters: newUserLimiters(), shutdown: shutdown, logger: logger}
 }
 
 // errorDomain is the ErrorInfo domain of the chat API (ADR-0003).
 const errorDomain = "chat.v1"
-
-// messageInterval and messageBurst limit how fast one stream posts: a
-// message every 200 ms on average, five a second, and ten at once
-// (ADR-0008).
-const (
-	messageInterval = 200 * time.Millisecond
-	messageBurst    = 10
-)
 
 var (
 	errSlowClient        = mustErrorInfo(codes.ResourceExhausted, "outbound queue full", "SLOW_CLIENT")
@@ -87,9 +80,12 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	}
 	defer sess.Close()
 
-	// Per stream, like the session: a client cannot spend another
-	// client's allowance (ADR-0008).
-	limiter := rate.NewLimiter(rate.Every(messageInterval), messageBurst)
+	// Per user, not per stream: opening more streams does not add to the
+	// allowance (ADR-0008). Connect has succeeded, so the claims are there.
+	claims, _ := auth.FromContext(ctx)
+	limiter, release := s.limiters.acquire(claims.UserID)
+	defer release()
+
 	reqs := make(chan *chatv1.ConnectRequest)
 	// Buffered so that the reader never blocks on reporting its last error.
 	recvErr := make(chan error, 1)

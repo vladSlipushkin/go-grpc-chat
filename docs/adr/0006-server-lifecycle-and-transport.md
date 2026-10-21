@@ -67,12 +67,12 @@ is needed for signal handling.
 The orchestrator's grace period must be longer than the shutdown timeout,
 otherwise it kills the process before `Stop` gets to cancel running RPCs:
 `docker stop` waits 10 seconds by default, exactly the default timeout here.
-The packaging stage sets `stop_grace_period` in Compose (and
-`terminationGracePeriodSeconds` for Kubernetes) with a margin over
-`CHAT_SHUTDOWN_TIMEOUT`. Behind a load balancer the missing drain delay
-means clients can still be routed to the server for a moment after it
-stops listening; a pause before `GracefulStop` would cover that and is
-deferred to the same stage.
+Compose sets `stop_grace_period` to 15 seconds (ADR-0012); Kubernetes
+would need the same margin in `terminationGracePeriodSeconds`. Behind a
+load balancer the missing drain delay means clients can still be routed to
+the server for a moment after it stops listening; a pause before
+`GracefulStop` would cover that, and is left until there are several
+instances to route to (ADR-0011).
 
 Rejected: `grpc.WaitForHandlers(true)` with a single `Stop`. It makes `Stop`
 wait for handlers, which `GracefulStop` already does, and it is still marked
@@ -110,10 +110,9 @@ already accepted connections running.
   is not refused but hangs in the kernel's accept backlog until its dial
   times out, with no status to act on. A limit per client address fails
   behind a proxy, where every connection comes from the proxy. Connection
-  limits belong to the load balancer or ingress in front of the server,
-  which the packaging stage sets up. Until then this is an accepted risk:
-  one client can open connections until the process runs out of memory or
-  file descriptors.
+  limits belong to the load balancer or ingress in front of the server
+  (ADR-0011). Without one this is an accepted risk: one client can open
+  connections until the process runs out of memory or file descriptors.
 
 ### Interceptors
 

@@ -22,7 +22,10 @@ else in `internal/`.
 ## Decision
 
 - `cmd/<binary>/` holds thin `main` packages. `main` only calls `run`, which
-  wires dependencies and owns the process lifecycle.
+  wires dependencies and owns the process lifecycle. The server's
+  components are wired in `internal/app` instead, so that tests of its
+  clients run the same assembly (ADR-0010); `cmd/server` only adds the
+  configuration, the listener and signals.
 - All application code lives in `internal/`. Packages are named after what
   they provide (`chat`, `auth`, `postgres`, `grpcapi`) rather than generic
   layer buckets such as `models`, `services` or `controllers`.

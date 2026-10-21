@@ -1,4 +1,4 @@
-// Package chattest runs the whole chat server, wired as cmd/server wires it,
+// Package chattest runs the chat server that cmd/server runs (internal/app)
 // over an in-memory listener for tests of its clients, the way
 // net/http/httptest does for HTTP.
 package chattest
@@ -14,15 +14,11 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
 	authv1 "github.com/vladSlipushkin/go-grpc-chat/gen/auth/v1"
-	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
-	"github.com/vladSlipushkin/go-grpc-chat/internal/auth"
-	"github.com/vladSlipushkin/go-grpc-chat/internal/chat"
-	"github.com/vladSlipushkin/go-grpc-chat/internal/grpcapi"
-	"github.com/vladSlipushkin/go-grpc-chat/internal/memory"
-	"github.com/vladSlipushkin/go-grpc-chat/internal/server"
+	"github.com/vladSlipushkin/go-grpc-chat/internal/app"
 )
 
 // Target is the address clients dial; DialOptions route it to the server.
@@ -34,15 +30,14 @@ type Options struct {
 	TokenTTL time.Duration
 }
 
-// Server is a running chat server. Users and the token secret survive
-// Restart, so tokens issued before it stay valid.
+// Server is a running chat server. The token secret survives Restart, so
+// tokens issued before it stay valid; accounts do not, as with cmd/server
+// until accounts are stored.
 type Server struct {
 	// tb is the test that started the server; failures after a restart
 	// are reported to it, since a subtest that restarted it may be over.
-	tb       testing.TB
-	tokens   *auth.Tokens
-	accounts *auth.Service
-	logger   *slog.Logger
+	tb   testing.TB
+	opts app.Options
 
 	lis  atomic.Pointer[bufconn.Listener]
 	mu   sync.Mutex
@@ -57,16 +52,13 @@ func Start(tb testing.TB, opts Options) *Server {
 	if ttl == 0 {
 		ttl = time.Hour
 	}
-	tokens, err := auth.NewTokens([]byte("chattest-secret-0123456789abcdef"), ttl)
-	if err != nil {
-		tb.Fatalf("NewTokens() error = %v", err)
-	}
-	// The minimum cost keeps registration and login fast (ADR-0002).
-	accounts, err := auth.NewService(memory.NewUsers(), tokens, auth.Options{BcryptCost: bcrypt.MinCost})
-	if err != nil {
-		tb.Fatalf("NewService() error = %v", err)
-	}
-	s := &Server{tb: tb, tokens: tokens, accounts: accounts, logger: slog.New(slog.DiscardHandler)}
+	s := &Server{tb: tb, opts: app.Options{
+		JWTSecret: []byte("chattest-secret-0123456789abcdef"),
+		TokenTTL:  ttl,
+		// The minimum cost keeps registration and login fast (ADR-0002).
+		BcryptCost:      bcrypt.MinCost,
+		ShutdownTimeout: time.Second,
+	}}
 	s.serve()
 	tb.Cleanup(s.Stop)
 	return s
@@ -75,26 +67,11 @@ func Start(tb testing.TB, opts Options) *Server {
 // serve starts a new server on a new listener and makes it the one clients
 // dial.
 func (s *Server) serve() {
-	srv := server.New(s.logger, s.tokens, server.Options{
-		ShutdownTimeout: time.Second,
-		PublicMethods: []string{
-			authv1.AuthService_Register_FullMethodName,
-			authv1.AuthService_Login_FullMethodName,
-		},
-	})
 	// Not a test context: it is cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
-	hub := chat.NewHub(s.logger)
-	authv1.RegisterAuthServiceServer(srv, grpcapi.NewAuthServer(s.accounts, s.logger))
-	chatv1.RegisterChatServiceServer(srv, grpcapi.NewChatServer(hub, ctx.Done(), s.logger))
-
 	lis := bufconn.Listen(1 << 20)
 	served := make(chan error, 1)
-	go func() {
-		err := srv.Serve(ctx, lis)
-		hub.Close()
-		served <- err
-	}()
+	go func() { served <- app.Serve(ctx, slog.New(slog.DiscardHandler), lis, s.opts) }()
 	s.lis.Store(lis)
 
 	s.mu.Lock()
@@ -117,7 +94,7 @@ func (s *Server) DialOptions() []grpc.DialOption {
 }
 
 // Restart shuts the server down, which ends open chat streams with
-// UNAVAILABLE, and starts a new one with empty rooms.
+// UNAVAILABLE, and starts a new one with empty rooms and no accounts.
 func (s *Server) Restart() {
 	s.Stop()
 	s.serve()
@@ -131,10 +108,18 @@ func (s *Server) Stop() {
 	stop()
 }
 
-// Register creates an account.
+// Register creates an account through the server's API.
 func (s *Server) Register(tb testing.TB, username, password string) {
 	tb.Helper()
-	if _, err := s.accounts.Register(tb.Context(), username, password); err != nil {
+
+	opts := append(s.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(Target, opts...)
+	if err != nil {
+		tb.Fatalf("NewClient() error = %v", err)
+	}
+	defer conn.Close()
+	req := &authv1.RegisterRequest{Username: username, Password: password}
+	if _, err := authv1.NewAuthServiceClient(conn).Register(tb.Context(), req); err != nil {
 		tb.Fatalf("Register(%q) error = %v", username, err)
 	}
 }

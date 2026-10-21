@@ -3,7 +3,7 @@
 #
 # Requires: Go 1.27, Docker, golangci-lint v2.14.0 (same version as CI).
 
-GO_IMAGE ?= golang:1.27.2
+GO_IMAGE ?= golang:1.27.3
 BIN_DIR  ?= bin
 
 # Development tools are pinned in a separate module so their dependencies

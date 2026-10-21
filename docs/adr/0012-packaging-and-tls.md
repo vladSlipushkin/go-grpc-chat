@@ -22,7 +22,7 @@ at an ingress (ADR-0011) or on the server.
 
 ### Image
 
-A two-stage build: `golang:1.27.2` compiles static binaries
+A two-stage build: `golang:1.27.3` compiles static binaries
 (`CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`), and the runtime image is
 `gcr.io/distroless/static-debian13:nonroot`, pinned by digest.
 

@@ -40,7 +40,10 @@ type repl struct {
 	env  Env
 	out  *printer
 
-	room string // the current room; only the loop uses it
+	// room is the current room; only the loop uses it. The session may
+	// leave it on its own, when a reconnect cannot rejoin it, so it is
+	// checked against the rooms joined before each use.
+	room string
 
 	want   chan struct{}         // the loop asks the reader for a line
 	lines  chan string           // the reader's answer; closed at end of input
@@ -221,6 +224,11 @@ func (r *repl) handle(ctx context.Context, line string) bool {
 }
 
 func (r *repl) say(ctx context.Context, text string) {
+	if r.room != "" && !slices.Contains(r.chat.Rooms(), r.room) {
+		r.out.printf("-- not sent: no longer in %s; /join %s --", r.room, r.room)
+		r.room = ""
+		return
+	}
 	if r.room == "" {
 		r.out.println("-- not in a room; /join ROOM first --")
 		return
@@ -258,7 +266,9 @@ func (r *repl) leave(ctx context.Context, room string) {
 	}
 	ctx, cancel := requestContext(ctx)
 	defer cancel()
-	if err := r.chat.Leave(ctx, room); err != nil {
+	// A leave whose stream broke has already taken the room off the list
+	// to rejoin: failed or not, the session is out of it.
+	if err := r.chat.Leave(ctx, room); err != nil && slices.Contains(r.chat.Rooms(), room) {
 		r.out.printf("-- cannot leave %s: %s --", room, describe(err))
 		return
 	}
@@ -290,6 +300,9 @@ func (r *repl) use(room string) {
 
 func (r *repl) rooms() {
 	rooms := r.chat.Rooms()
+	if !slices.Contains(rooms, r.room) {
+		r.room = ""
+	}
 	if len(rooms) == 0 {
 		r.out.println("-- no rooms; /join ROOM --")
 		return
@@ -330,6 +343,9 @@ func (r *repl) print(events <-chan client.Event) {
 				r.out.println("-- reconnected --")
 			default:
 				r.out.printf("-- reconnected; rejoined %s --", strings.Join(e.Rooms, ", "))
+			}
+			if len(e.Dropped) > 0 {
+				r.out.printf("-- could not rejoin %s --", strings.Join(e.Dropped, ", "))
 			}
 		}
 	}

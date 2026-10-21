@@ -9,9 +9,9 @@ import (
 // Session is one connection's membership in the hub: the rooms it is in and
 // its outbound queue.
 //
-// Join, Leave, Send and Close must be called from one goroutine, the
-// stream handler's; they return once the room has applied them. Enqueue and
-// Events are safe for concurrent use.
+// Join, Leave, Send, InRoom and Close must be called from one goroutine,
+// the stream handler's; the first three return once the room has applied
+// them. UserID, Enqueue and Events are safe for concurrent use.
 //
 // Once the session has ended, its handler stops calling Join, Leave and
 // Send: their results are no longer meaningful. Join of a room whose
@@ -76,6 +76,17 @@ func (s *Session) leave(ctx context.Context, roomID string) error {
 	delete(s.rooms, roomID)
 	s.hub.release(r)
 	return nil
+}
+
+// UserID returns the id of the user the session belongs to.
+func (s *Session) UserID() string {
+	return s.user.UserID
+}
+
+// InRoom reports whether the session is in the room with roomID.
+func (s *Session) InRoom(roomID string) bool {
+	_, ok := s.rooms[roomID]
+	return ok
 }
 
 // Send posts text to the room with roomID and returns the message's id.

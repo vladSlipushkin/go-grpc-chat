@@ -76,8 +76,9 @@ func Dial(addr string, opts Options) (*Conn, error) {
 		}),
 		// While the server is down, a new stream fails at once until gRPC
 		// connects again, so gRPC's own backoff, up to two minutes by
-		// default, would decide when a session comes back. These bounds
-		// match the session's (ADR-0010).
+		// default, would decide when a session comes back. Its base and
+		// cap match the session's; its jitter is ±50%, so it can wait up
+		// to 45 s (ADR-0010).
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: grpcbackoff.Config{
 				BaseDelay:  defaultMinBackoff,

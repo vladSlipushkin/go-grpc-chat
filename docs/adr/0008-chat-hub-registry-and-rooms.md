@@ -140,7 +140,7 @@ benchmark has no writers competing for the CPU. A limit would also need a
 new error reason in the contract. Fan-out time per room is the metric to
 watch once metrics exist.
 
-### Message rate: limited per stream
+### Message rate: limited per user
 
 Without a limit, one client could post a few thousand messages a second
 into a large room, since each send waits only for its room. Members whose
@@ -149,35 +149,51 @@ queues and be dropped as `SLOW_CLIENT`, although the sender is the cause.
 An ingress cannot help: it limits connections and requests, not messages
 inside a long-lived stream.
 
-The stream handler therefore limits each stream to five messages a second
+The stream handler therefore limits each user to five messages a second
 on average and ten at once, with a token bucket (`golang.org/x/time/rate`).
 A message over the limit is rejected in the stream like any request error:
 `RESOURCE_EXHAUSTED` with reason `RATE_LIMITED` and a `google.rpc.RetryInfo`
 saying when the next token is free. The stream stays open. Only messages
-actually posted use up a token: an invalid one is rejected before the
-limiter, and one refused by the limiter or sent to a room not joined gives
-its reservation back.
+actually posted use up a token: an invalid one and one to a room not joined
+are rejected before the limiter, and the limiter's `AllowN` takes nothing
+when it refuses.
+
+Rejected: reserving a token and cancelling the reservation when the message
+is not posted. `x/time/rate` gives a token back only while the reservation's
+time to act has not passed, which for a token taken at once is the moment
+of the reservation; any time spent on the request after it makes the cancel
+do nothing. On Windows, where the clock often does not move between the
+two, the loss does not even show in tests. With a bucket shared by several
+streams, reservations of two streams can also interleave and leave one
+refused message charged.
 
 - Five a second is far above anyone typing, and a burst of ten lets a
-  pasted block of lines through. One stream then adds at most ten messages
+  pasted block of lines through. One user then adds at most ten messages
   at once and five a second to a member's queue of 64; a member that keeps
-  reading drains that long before it fills, so one stream alone can no
+  reading drains that long before it fills, so one user alone can no
   longer get members dropped.
+- The bucket belongs to the user, not to the stream. A client could
+  otherwise multiply its allowance by opening streams: up to 100 on one
+  HTTP/2 connection (ADR-0006) and any number of connections. All of a
+  user's streams draw on one limiter, kept in a map by user id under a
+  mutex in the `ChatServer`. The first stream of a user creates it and the
+  last one to close removes it, so the map holds only users with an open
+  stream.
 - The limit lives in the handler, next to validation, rather than in the
-  hub: it belongs to the stream, like the session's queue, and the room's
-  goroutine stays free of per-sender state.
+  hub: the room's goroutine stays free of per-sender state, and the hub
+  keeps no state between a user's sessions.
 - Joins and leaves are not limited. They post nothing to other members,
   and each one waits for its room.
 - The client is told how long to wait, but the CLI only asks the user to
   slow down: a person reads "wait a moment" faster than a delay in
   milliseconds.
 
-The limit is per stream, not per user. A client with several streams, up
-to 100 on one HTTP/2 connection (ADR-0006) and any number of HTTP/2
-connections, gets the allowance of each. A per-user limit needs state shared by the user's
-streams, kept in the hub and cleaned up when the last stream ends. Until
-then this remainder is an accepted risk, bounded in practice by the
-connection limit the ingress sets in front of the server.
+What remains is a user who closes every stream and opens a new one: the new
+stream starts with a full bucket, ten messages for the price of a stream
+and a join. Keeping an emptied limiter until it has refilled would close
+that, at the cost of entries that outlive their streams and a sweep to
+remove them. Until it is needed, the cost of opening streams, which the
+ingress's connection and request limits bound, is the limit.
 
 ## Rejected
 

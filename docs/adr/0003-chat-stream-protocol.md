@@ -159,7 +159,7 @@ several causes, the status carries a `google.rpc.ErrorInfo` detail with
 domain `chat.v1` and one of these reasons:
 
 - `ROOM_LIMIT_EXCEEDED`: the join would exceed 16 rooms (in the stream);
-- `RATE_LIMITED`: the connection posts messages faster than the server
+- `RATE_LIMITED`: the user posts messages faster than the server
   allows (in the stream, with a `google.rpc.RetryInfo`; ADR-0008);
 - `SLOW_CLIENT`: the outbound queue was full (ends the stream);
 - `TOKEN_EXPIRED`: the access token expired (ends the stream).
@@ -231,7 +231,10 @@ client.
 
 - Clients hold one connection and authenticate once for any number of rooms.
 - Clients must handle reconnects: re-join their rooms and accept message loss
-  until `ListMessages` exists; `seq` tells them when it happened.
+  until `ListMessages` exists. Once messages are stored, `seq` tells them
+  what they missed across a reconnect; until then it cannot be compared
+  across one (see `seq` above), and the reconnect itself is the only sign
+  that messages may have been lost.
 - The room implementation must never block on a single connection, a
   connection must leave all rooms when its token expires, and kicking a client
   must not leak goroutines. These are covered by tests when the hub and the

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"time"
 
@@ -30,6 +31,7 @@ type ChatServer struct {
 	chatv1.UnimplementedChatServiceServer
 
 	hub      *chat.Hub
+	limiters *userLimiters
 	shutdown <-chan struct{}
 	logger   *slog.Logger
 }
@@ -39,19 +41,11 @@ type ChatServer struct {
 // ends with UNAVAILABLE; graceful stop alone would wait for clients to hang
 // up (ADR-0006). A nil shutdown never fires.
 func NewChatServer(hub *chat.Hub, shutdown <-chan struct{}, logger *slog.Logger) *ChatServer {
-	return &ChatServer{hub: hub, shutdown: shutdown, logger: logger}
+	return &ChatServer{hub: hub, limiters: newUserLimiters(), shutdown: shutdown, logger: logger}
 }
 
 // errorDomain is the ErrorInfo domain of the chat API (ADR-0003).
 const errorDomain = "chat.v1"
-
-// messageInterval and messageBurst limit how fast one stream posts: a
-// message every 200 ms on average, five a second, and ten at once
-// (ADR-0008).
-const (
-	messageInterval = 200 * time.Millisecond
-	messageBurst    = 10
-)
 
 var (
 	errSlowClient        = mustErrorInfo(codes.ResourceExhausted, "outbound queue full", "SLOW_CLIENT")
@@ -87,9 +81,11 @@ func (s *ChatServer) Connect(stream chatv1.ChatService_ConnectServer) error {
 	}
 	defer sess.Close()
 
-	// Per stream, like the session: a client cannot spend another
-	// client's allowance (ADR-0008).
-	limiter := rate.NewLimiter(rate.Every(messageInterval), messageBurst)
+	// Per user, not per stream: opening more streams does not add to the
+	// allowance (ADR-0008).
+	limiter, release := s.limiters.acquire(sess.UserID())
+	defer release()
+
 	reqs := make(chan *chatv1.ConnectRequest)
 	// Buffered so that the reader never blocks on reporting its last error.
 	recvErr := make(chan error, 1)
@@ -240,18 +236,20 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 	case *chatv1.ConnectRequest_LeaveRoom:
 		err = sess.Leave(ctx, a.LeaveRoom.GetRoomId())
 	case *chatv1.ConnectRequest_SendMessage:
-		// Only messages posted use up a token: a rejected one gives its
-		// reservation back (ADR-0008).
-		r := limiter.Reserve()
-		if wait := r.Delay(); wait > 0 {
-			r.Cancel()
-			sess.Enqueue(chat.Rejection{RequestID: id, Err: rateLimited(wait)})
+		// Only messages posted use up a token (ADR-0008): one to a room not
+		// joined is refused before the limiter, and AllowN takes nothing
+		// when it refuses. Nothing is reserved, so nothing has to be given
+		// back, and the user's other streams see a consistent bucket.
+		room := a.SendMessage.GetRoomId()
+		if !sess.InRoom(room) {
+			err = chat.ErrNotMember
+			break
+		}
+		if now := time.Now(); !limiter.AllowN(now, 1) {
+			sess.Enqueue(chat.Rejection{RequestID: id, Err: rateLimited(untilToken(limiter, now))})
 			return
 		}
-		messageID, err = sess.Send(ctx, a.SendMessage.GetRoomId(), a.SendMessage.GetText())
-		if err != nil {
-			r.Cancel()
-		}
+		messageID, err = sess.Send(ctx, room, a.SendMessage.GetText())
 	default:
 		// An action added to the contract but not handled here yet.
 		sess.Enqueue(chat.Rejection{RequestID: id, Err: errUnsupportedAction})
@@ -271,6 +269,14 @@ func apply(ctx context.Context, logger *slog.Logger, end context.CancelCauseFunc
 		// ErrHubClosed, ErrRoomFailed or a failure inside the hub.
 		end(err)
 	}
+}
+
+// untilToken returns how long after now limiter has a whole token again,
+// rounded up and at least a millisecond, so RetryInfo never says to retry
+// at once.
+func untilToken(limiter *rate.Limiter, now time.Time) time.Duration {
+	wait := time.Duration(math.Ceil((1 - limiter.TokensAt(now)) * float64(messageInterval)))
+	return max(wait, time.Millisecond)
 }
 
 // rateLimited reports a message sent too fast, with how long to wait.

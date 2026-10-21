@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	chatv1 "github.com/vladSlipushkin/go-grpc-chat/gen/chat/v1"
 )
@@ -24,6 +25,9 @@ var (
 	// ErrClosed reports a request made after Close was called or Run
 	// returned.
 	ErrClosed = errors.New("chat closed")
+	// ErrNotRunning reports a Close whose context ended before Run was
+	// called.
+	ErrNotRunning = errors.New("chat not running")
 	// ErrNotConnected reports a request that gave up waiting for a
 	// reconnect.
 	ErrNotConnected = errors.New("not connected")
@@ -54,7 +58,9 @@ type ChatOptions struct {
 	// fails, Run returns. It must return once ctx is done.
 	Relogin func(ctx context.Context) (string, error)
 	// MinBackoff and MaxBackoff bound the wait between reconnect attempts.
-	// Zero values mean 500 ms and 30 s.
+	// The wait grows with each attempt and starts again from MinBackoff
+	// after a stream that stayed open longer than MaxBackoff. Zero values
+	// mean 500 ms and 30 s.
 	MinBackoff, MaxBackoff time.Duration
 }
 
@@ -72,6 +78,7 @@ type Chat struct {
 	events   chan Event
 	quit     chan struct{} // closed when the session is to end
 	quitOnce sync.Once
+	started  chan struct{} // closed when Run starts
 	done     chan struct{} // closed when Run returns
 
 	// sendMu serializes Send and CloseSend: gRPC allows one sender at a
@@ -113,6 +120,7 @@ func (c *Conn) NewChat(token string, opts ChatOptions) *Chat {
 		backoff: b,
 		events:  make(chan Event),
 		quit:    make(chan struct{}),
+		started: make(chan struct{}),
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
 		pending: make(map[string]pending),
@@ -175,9 +183,18 @@ func (c *Chat) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Under the lock, so that a Close either sees Run started or is seen
+	// by it.
 	c.mu.Lock()
+	closing := c.closing
 	c.cancelRun = cancel
+	close(c.started)
 	c.mu.Unlock()
+	// A Close that came first is waiting for Run to start, or has given
+	// up: either way there is nothing to serve.
+	if closing {
+		return nil
+	}
 
 	token := c.token
 	attempt := 0
@@ -185,8 +202,12 @@ func (c *Chat) Run(ctx context.Context) error {
 		if c.quitting() {
 			return nil
 		}
-		answered, err := c.serve(ctx, token)
-		if answered {
+		lasted, err := c.serve(ctx, token)
+		// A stream that outlived the longest wait shows the server is
+		// working again; one that ends soon after the rejoin does not, and
+		// resetting on it would come back every few hundred milliseconds
+		// to a server that keeps failing.
+		if lasted > c.backoff.max {
 			attempt = 0
 		}
 
@@ -230,9 +251,9 @@ func (c *Chat) ended(ctx context.Context) error {
 }
 
 // serve runs one stream: it opens it, joins the rooms again and keeps it
-// until it ends or Close asks for the end. answered reports whether the
-// server replied at all, which resets the backoff.
-func (c *Chat) serve(ctx context.Context, token string) (answered bool, err error) {
+// until it ends or Close asks for the end. lasted is how long the stream
+// was open, zero if it never opened.
+func (c *Chat) serve(ctx context.Context, token string) (lasted time.Duration, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	// Cancelling the stream's context also ends it on the server, so a
 	// stream given up here does not linger there.
@@ -240,22 +261,19 @@ func (c *Chat) serve(ctx context.Context, token string) (answered bool, err erro
 
 	stream, err := c.api.Connect(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
+	opened := time.Now()
 	c.mu.Lock()
 	c.stream = stream
 	c.mu.Unlock()
 
-	// Both are written by the receiver and read only after received is
-	// closed.
-	var (
-		got     bool
-		recvErr error
-	)
+	// Written by the receiver and read only after received is closed.
+	var recvErr error
 	received := make(chan struct{})
 	go func() {
 		defer close(received)
-		recvErr = c.receive(ctx, stream, &got)
+		recvErr = c.receive(ctx, stream)
 		c.detach(stream)
 	}()
 
@@ -266,14 +284,15 @@ func (c *Chat) serve(ctx context.Context, token string) (answered bool, err erro
 	if err == nil {
 		err = recvErr
 	}
-	return got, err
+	return time.Since(opened), err
 }
 
 // hold joins the rooms again on a new stream and keeps the stream until
 // the receiver stops or Close asks for the end. A nil result leaves the
 // reason to the receiver.
 func (c *Chat) hold(ctx context.Context, stream chatStream, received <-chan struct{}) error {
-	if err := c.rejoin(ctx, stream); err != nil {
+	dropped, err := c.rejoin(ctx, stream)
+	if err != nil {
 		if errors.Is(err, ErrConnectionLost) {
 			return nil
 		}
@@ -283,7 +302,7 @@ func (c *Chat) hold(ctx context.Context, stream chatStream, received <-chan stru
 		// The stream broke right after the rejoin.
 		return nil
 	}
-	if !c.emit(ctx, Connected{Rooms: c.Rooms()}) {
+	if !c.emit(ctx, Connected{Rooms: c.Rooms(), Dropped: dropped}) {
 		return ctx.Err()
 	}
 
@@ -306,34 +325,35 @@ func (c *Chat) hold(ctx context.Context, stream chatStream, received <-chan stru
 	}
 }
 
-// rejoin joins the rooms of the previous stream on a new one. A room the
-// server refuses is dropped; a broken stream stops it.
-func (c *Chat) rejoin(ctx context.Context, stream chatStream) error {
+// rejoin joins the rooms of the previous stream on a new one and returns
+// the rooms the server refused, which are dropped. A broken stream stops
+// it.
+func (c *Chat) rejoin(ctx context.Context, stream chatStream) (dropped []string, err error) {
 	for _, room := range c.Rooms() {
 		err := c.roundTrip(ctx, stream, joinRequest(room))
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrConnectionLost), ctx.Err() != nil:
-			return err
+			return nil, err
 		default:
 			c.mu.Lock()
 			delete(c.rooms, room)
 			c.mu.Unlock()
+			dropped = append(dropped, room)
 		}
 	}
-	return nil
+	return dropped, nil
 }
 
 // receive reads the stream until it ends: replies go to the requests
 // waiting for them, messages to Events.
-func (c *Chat) receive(ctx context.Context, stream chatStream, got *bool) error {
+func (c *Chat) receive(ctx context.Context, stream chatStream) error {
 	seqs := make(seqTracker)
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
 			return err
 		}
-		*got = true
 		switch e := resp.GetEvent().(type) {
 		case *chatv1.ConnectResponse_Ack:
 			if req := c.resolve(e.Ack.GetRequestId(), nil); req.GetLeaveRoom() != nil {
@@ -403,8 +423,11 @@ func (c *Chat) awaitReady(ctx context.Context) (chatStream, error) {
 	}
 }
 
-// roundTrip sends req on stream and waits for its Ack or Error.
+// roundTrip sends a copy of req with a fresh request_id on stream and waits
+// for its Ack or Error. req itself is left alone: gRPC does not allow a
+// message to change once it has been sent, and a retry sends req again.
 func (c *Chat) roundTrip(ctx context.Context, stream chatStream, req *chatv1.ConnectRequest) error {
+	req = proto.CloneOf(req)
 	reply := make(chan error, 1)
 	c.mu.Lock()
 	if c.stream != stream {
@@ -498,12 +521,27 @@ func (c *Chat) detach(stream chatStream) {
 // requests, waits for the replies to those already sent, half-closes the
 // stream and waits for the server to end it. If ctx ends first, it cancels
 // the stream instead. Events must still be read meanwhile. Run returns
-// before Close does; Run must have been called. Close may be called more
-// than once.
+// before Close does. Close may be called more than once.
+//
+// Close may come first when Run is started on another goroutine. It then
+// waits for Run to be called, until ctx ends, and that Run returns at once.
+// If ctx ends first, Close returns ErrNotRunning, and a later Run returns at
+// once.
 func (c *Chat) Close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closing = true
 	c.mu.Unlock()
+	select {
+	case <-c.started:
+	case <-ctx.Done():
+		select {
+		case <-c.started:
+		default:
+			// A Run that starts from now on sees closing.
+			c.stop()
+			return fmt.Errorf("close chat: %w: %w", ErrNotRunning, ctx.Err())
+		}
+	}
 
 	answered := make(chan struct{})
 	go func() {

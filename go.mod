@@ -18,7 +18,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
 	// Before upgrading, re-check the grpc-go internals ADR-0009 relies on
 	// ("The stream after the handler returns"); no test would notice a change.
-	google.golang.org/grpc v1.84.0
+	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 )
 

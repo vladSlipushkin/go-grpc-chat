@@ -13,7 +13,7 @@ require (
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/term v0.47.0
-	golang.org/x/text v0.43.0
+	golang.org/x/text v0.44.0
 	golang.org/x/time v0.16.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
 	// Before upgrading, re-check the grpc-go internals ADR-0009 relies on
